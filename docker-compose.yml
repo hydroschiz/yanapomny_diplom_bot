@@ -1,0 +1,31 @@
+services:
+  mongodb1:
+    image: mongo:4.4.6
+    container_name: mongodb1
+    restart: unless-stopped
+    volumes:
+      - ./data/db_data:/data/db
+      - ./data/log:/data/log
+      - ./data/mongod.conf:/etc/mongod.conf
+    ports:
+      - "27018:27017"
+    entrypoint: ["/bin/sh", "-c", "exec mongod --config /etc/mongod.conf"]
+
+  bot:
+    image: rustlang/rust:nightly
+    container_name: yanapomnyu-bot
+    restart: unless-stopped
+    depends_on:
+      - mongodb1
+    working_dir: /app
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    # MONGO_URI is picked from .env; fallback keeps legacy-compatible defaults.
+    environment:
+      - MONGO_URI=${MONGO_URI:-mongodb://tgBotUser:tgBotPassword@mongodb1:27017/tgBot?authSource=tgBot}
+    command: bash -lc "source /usr/local/cargo/env && cargo +nightly build --release && ./target/release/yanapomnyu_bot"
+    # expose/ports if webhook or http server is needed; uncomment and set host port.
+    # ports:
+    #   - "443:443"
