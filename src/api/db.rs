@@ -18,9 +18,47 @@ const REMINDERS_COLLECTION: &str = "reminds";
 const RECORDS_COLLECTION: &str = "records";
 const TRANSACTIONS_COLLECTION: &str = "transactions";
 
+/// New payment transaction for YooKassa payments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentTransaction {
+    #[serde(rename = "paymentId")]
+    pub payment_id: String,
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    pub amount: f64,
+    pub currency: String,
+    pub status: String,
+    /// Duration in months (3, 6, 12).
+    #[serde(default)]
+    pub months: Option<i32>,
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(
+        rename = "updatedAt",
+        with = "chrono_datetime_as_bson_datetime",
+        default = "Utc::now"
+    )]
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub fulfilled: Option<bool>,
+    #[serde(
+        rename = "fulfilledAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    pub fulfilled_at: Option<DateTime<Utc>>,
+    /// YooKassa idempotence key.
+    #[serde(rename = "idempotenceKey", default)]
+    pub idempotence_key: Option<String>,
+    /// Payment provider (yookassa, etc).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 /// MongoDB wrapper that keeps all DB-specific logic in one place.
 #[derive(Clone)]
 pub struct Db {
+    #[allow(dead_code)]
     client: Client,
     db: Database,
 }
@@ -190,6 +228,178 @@ impl Db {
         self.users().update_one(filter, update, None).await?;
         Ok(())
     }
+
+    // ===== Subscription / Records methods =====
+
+    /// Find user's subscription record.
+    pub async fn find_record(&self, id: i64) -> Result<Option<UserRecord>> {
+        let filter = doc! {"id": id};
+        Ok(self.records().find_one(filter, None).await?)
+    }
+
+    /// Ensure a subscription record exists. Creates one with 7-day trial if not found.
+    pub async fn ensure_record(&self, id: i64) -> Result<UserRecord> {
+        if let Some(record) = self.find_record(id).await? {
+            return Ok(record);
+        }
+        self.create_record(id).await
+    }
+
+    /// Create a new subscription record with 7-day trial.
+    pub async fn create_record(&self, id: i64) -> Result<UserRecord> {
+        let record = UserRecord::new_trial(id);
+        self.records().insert_one(&record, None).await?;
+        Ok(record)
+    }
+
+    /// Check if subscription is active (nextPaymentDate > now).
+    pub async fn is_subscription_active(&self, id: i64) -> Result<bool> {
+        if let Some(record) = self.find_record(id).await? {
+            return Ok(record.is_active());
+        }
+        Ok(false)
+    }
+
+    /// Extend subscription by N months from current expiry or now (whichever is later).
+    pub async fn extend_subscription(&self, id: i64, months: i32) -> Result<DateTime<Utc>> {
+        let record = self.ensure_record(id).await?;
+        let now = Utc::now();
+
+        // Start from current expiry if still active, otherwise from now
+        let base = if record.next_payment_date > now {
+            record.next_payment_date
+        } else {
+            now
+        };
+
+        // Add months
+        let new_expiry = add_months(base, months);
+
+        let filter = doc! {"id": id};
+        let update = doc! {
+            "$set": {
+                "nextPaymentDate": mongodb::bson::DateTime::from_chrono(new_expiry),
+                "active": true,
+                "freestate": 2  // Mark as paid user
+            }
+        };
+        self.records().update_one(filter, update, None).await?;
+
+        Ok(new_expiry)
+    }
+
+    /// Get subscription expiry date.
+    pub async fn get_subscription_expiry(&self, id: i64) -> Result<Option<DateTime<Utc>>> {
+        if let Some(record) = self.find_record(id).await? {
+            return Ok(Some(record.next_payment_date));
+        }
+        Ok(None)
+    }
+
+    // ===== Transaction methods =====
+
+    /// Save a payment transaction.
+    pub async fn save_transaction(&self, tx: &PaymentTransaction) -> Result<()> {
+        self.db
+            .collection::<PaymentTransaction>("transactions")
+            .insert_one(tx, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Find transaction by payment ID.
+    pub async fn find_transaction_by_payment_id(
+        &self,
+        payment_id: &str,
+    ) -> Result<Option<PaymentTransaction>> {
+        let filter = doc! {"paymentId": payment_id};
+        Ok(self
+            .db
+            .collection::<PaymentTransaction>("transactions")
+            .find_one(filter, None)
+            .await?)
+    }
+
+    /// Update transaction status.
+    pub async fn update_transaction_status(
+        &self,
+        payment_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        let filter = doc! {"paymentId": payment_id};
+        let update = doc! {
+            "$set": {
+                "status": status,
+                "updatedAt": mongodb::bson::DateTime::from_chrono(Utc::now())
+            }
+        };
+        self.db
+            .collection::<Document>("transactions")
+            .update_one(filter, update, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Mark transaction as fulfilled.
+    pub async fn mark_transaction_fulfilled(&self, payment_id: &str) -> Result<()> {
+        let filter = doc! {"paymentId": payment_id};
+        let update = doc! {
+            "$set": {
+                "fulfilled": true,
+                "fulfilledAt": mongodb::bson::DateTime::from_chrono(Utc::now())
+            }
+        };
+        self.db
+            .collection::<Document>("transactions")
+            .update_one(filter, update, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Check if transaction was already fulfilled.
+    pub async fn is_transaction_fulfilled(&self, payment_id: &str) -> Result<bool> {
+        if let Some(tx) = self.find_transaction_by_payment_id(payment_id).await? {
+            return Ok(tx.fulfilled.unwrap_or(false));
+        }
+        Ok(false)
+    }
+}
+
+/// Helper to add months to a DateTime.
+fn add_months(dt: DateTime<Utc>, months: i32) -> DateTime<Utc> {
+    use chrono::{Datelike, NaiveDate};
+
+    let date = dt.date_naive();
+    let mut year = date.year();
+    let mut month = date.month() as i32 + months;
+
+    while month > 12 {
+        month -= 12;
+        year += 1;
+    }
+    while month < 1 {
+        month += 12;
+        year -= 1;
+    }
+
+    // Handle day overflow (e.g., Jan 31 + 1 month = Feb 28/29)
+    let day = date.day().min(days_in_month(year, month as u32));
+    let new_date = NaiveDate::from_ymd_opt(year, month as u32, day).unwrap_or(date);
+    let new_dt = new_date.and_time(dt.time());
+
+    DateTime::<Utc>::from_naive_utc_and_offset(new_dt, Utc)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::NaiveDate;
+    if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .unwrap()
+    .signed_duration_since(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
+    .num_days() as u32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,18 +469,46 @@ pub struct Reminder {
 pub struct UserRecord {
     #[serde(rename = "id")]
     pub chat_id: i64,
+    /// Legacy balance field - kept for compatibility, not used in new logic.
     #[serde(default)]
     pub balance: i32,
-    #[serde(rename = "isGroup")]
+    #[serde(rename = "isGroup", default)]
     pub is_group: bool,
     #[serde(rename = "groupName", default)]
     pub group_name: String,
+    /// Subscription expiry date. Named "nextPaymentDate" for legacy compatibility.
     #[serde(rename = "nextPaymentDate", with = "chrono_datetime_as_bson_datetime")]
     pub next_payment_date: DateTime<Utc>,
     #[serde(default)]
     pub active: bool,
+    /// 0 = no trial, 1 = new user (7 days trial), 2 = paid user, 3 = got bonus week
     #[serde(rename = "freestate", default)]
     pub free_state: Option<i32>,
+}
+
+impl UserRecord {
+    /// Create a new trial subscription (7 days).
+    pub fn new_trial(id: i64) -> Self {
+        Self {
+            chat_id: id,
+            balance: 0,
+            is_group: false,
+            group_name: String::new(),
+            next_payment_date: Utc::now() + chrono::Duration::days(7),
+            active: true,
+            free_state: Some(1), // New user with trial
+        }
+    }
+
+    /// Check if subscription is currently active.
+    pub fn is_active(&self) -> bool {
+        self.next_payment_date > Utc::now()
+    }
+
+    /// Format expiry date for display.
+    pub fn expiry_formatted(&self) -> String {
+        self.next_payment_date.format("%d.%m.%Y").to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

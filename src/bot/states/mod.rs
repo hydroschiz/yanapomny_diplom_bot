@@ -7,4 +7,6 @@ pub enum AppState {
     AwaitingUtc,
     AwaitingSnoozeButtons,
     AwaitingAutoSnooze,
+    /// User is in payment flow, storing selected months.
+    AwaitingPayment { months: i32 },
 }

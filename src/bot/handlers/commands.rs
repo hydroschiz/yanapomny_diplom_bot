@@ -20,6 +20,8 @@ pub enum Command {
     Utc,
     #[command(description = "Настройки пользователя")]
     Setup,
+    #[command(description = "Оплата подписки")]
+    Pay,
 }
 
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
@@ -32,7 +34,8 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
             .branch(dptree::case![Command::Start].endpoint(command_start))
             .branch(dptree::case![Command::Help].endpoint(command_help))
             .branch(dptree::case![Command::Utc].endpoint(command_utc))
-            .branch(dptree::case![Command::Setup].endpoint(command_setup)),
+            .branch(dptree::case![Command::Setup].endpoint(command_setup))
+            .branch(dptree::case![Command::Pay].endpoint(super::pay::command_pay)),
     )
 }
 

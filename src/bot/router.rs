@@ -1,14 +1,14 @@
+use std::sync::Arc;
+
 use teloxide::dispatching::UpdateHandler;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::prelude::*;
 
 use crate::api::db::Db;
+use crate::api::payments::PaymentService;
 use crate::bot::{states::AppState, filters};
-// use crate::utils::db::Db;
-// use crate::api::<your_api_here>::Client;
 
 use super::handlers;
-// use super::filters;
 
 pub type AppDialogue = Dialogue<AppState, InMemStorage<AppState>>;
 pub type HandlerResult = Result<(), anyhow::Error>;
@@ -17,8 +17,14 @@ pub async fn build_deps() -> anyhow::Result<DependencyMap> {
     let config = crate::config::Config::from_env();
     let storage = InMemStorage::<AppState>::new();
     let db = Db::connect(&config.mongo_uri, None).await?;
-    // Добавляйте сюда зависимости для инъекций в хэндлеры
-    Ok(dptree::deps![config, storage, db])
+
+    // Initialize PaymentService if YK_SHOP_ID is set
+    let payment_svc: Arc<PaymentService> = Arc::new(
+        PaymentService::from_env(db.clone())
+            .expect("Failed to initialize PaymentService. Check YK_SHOP_ID and YK_SECRET_KEY env vars.")
+    );
+
+    Ok(dptree::deps![config, storage, db, payment_svc])
 }
 
 pub fn schema() -> UpdateHandler<anyhow::Error> {

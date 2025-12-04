@@ -11,21 +11,31 @@ services:
       - "27018:27017"
     entrypoint: ["/bin/sh", "-c", "exec mongod --config /etc/mongod.conf"]
 
+  redis:
+    image: redis:7-alpine
+    container_name: yanapomnyu-redis
+    restart: unless-stopped
+    volumes:
+      - ./data/redis_data:/data
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+
   bot:
     image: rustlang/rust:nightly
     container_name: yanapomnyu-bot
     restart: unless-stopped
     depends_on:
       - mongodb1
+      - redis
     working_dir: /app
     volumes:
       - ./:/app
     env_file:
       - .env
-    # MONGO_URI is picked from .env; fallback keeps legacy-compatible defaults.
     environment:
       - MONGO_URI=${MONGO_URI:-mongodb://tgBotUser:tgBotPassword@mongodb1:27017/tgBot?authSource=tgBot}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/}
     command: bash -lc "source /usr/local/cargo/env && cargo +nightly build --release && ./target/release/yanapomnyu_bot"
-    # expose/ports if webhook or http server is needed; uncomment and set host port.
-    # ports:
-    #   - "443:443"
+    ports:
+      - "3001:3001"

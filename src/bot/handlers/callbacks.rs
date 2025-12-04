@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use teloxide::prelude::*;
 
 use crate::api::db::Db;
+use crate::api::payments::PaymentService;
 use crate::bot::{
     router::{AppDialogue, HandlerResult},
     states::AppState,
@@ -17,6 +20,7 @@ pub async fn handle_callback(
     cq: CallbackQuery,
     dialogue: AppDialogue,
     db: Db,
+    payment_svc: Arc<PaymentService>,
 ) -> HandlerResult {
     let data = if let Some(data) = cq.data.clone() {
         data
@@ -103,6 +107,11 @@ pub async fn handle_callback(
                 .await?;
             return Ok(());
         }
+    }
+
+    // Handle pay_* callbacks
+    if data.starts_with("pay_") {
+        return super::pay::handle_pay_callback(bot, cq, dialogue, db, payment_svc).await;
     }
 
     // Unknown callback data: send quick error.
