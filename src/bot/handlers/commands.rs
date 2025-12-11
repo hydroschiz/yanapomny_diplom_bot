@@ -1,10 +1,10 @@
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 
-use super::callbacks::utc_keyboard;
 use super::text::timezone_offset_string;
 use crate::api::db::Db;
 use crate::bot::{
     filters,
+    keyboards::{setup_keyboard, utc_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
@@ -16,12 +16,16 @@ pub enum Command {
     Start,
     #[command(description = "Помощь")]
     Help,
+    #[command(description = "О Яне")]
+    Yan,
     #[command(description = "Настройка часового пояса")]
     Utc,
     #[command(description = "Настройки пользователя")]
     Setup,
     #[command(description = "Оплата подписки")]
     Pay,
+    #[command(description = "Список напоминаний")]
+    List,
 }
 
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
@@ -33,9 +37,11 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
             .filter(filters::private_chat_msg)
             .branch(dptree::case![Command::Start].endpoint(command_start))
             .branch(dptree::case![Command::Help].endpoint(command_help))
+            .branch(dptree::case![Command::Yan].endpoint(command_yan))
             .branch(dptree::case![Command::Utc].endpoint(command_utc))
             .branch(dptree::case![Command::Setup].endpoint(command_setup))
-            .branch(dptree::case![Command::Pay].endpoint(super::pay::command_pay)),
+            .branch(dptree::case![Command::Pay].endpoint(super::pay::command_pay))
+            .branch(dptree::case![Command::List].endpoint(super::reminder::handle_list_command)),
     )
 }
 
@@ -68,6 +74,28 @@ async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
 📞 <b>Вопросы или предложения</b>:
 
 Пишите в чат технической поддержки: @yanapomnyu_support"#;
+
+    bot.send_message(msg.chat.id, text)
+        .parse_mode(ParseMode::Html)
+        .await?;
+
+    Ok(())
+}
+
+async fn command_yan(bot: Bot, msg: Message) -> HandlerResult {
+    let text = r#"Привет! Я — <b>Ян</b>, твой персональный ИИ-помощник 🧠 Я помогу тебе управлять временем, делами и напоминаниями прямо в Telegram.
+
+<b>Вот что я умею</b>:<blockquote>
+• Автоматически создавать напоминания по любому тексту — просто напиши, что и когда сделать.
+• Подсказывать, как лучше распределить задачи и не перегружать день.
+• Давать советы по тайм-менеджменту и концентрации.
+• Анализировать твои напоминания и помогать выстроить привычки.
+• Работать с голосовыми сообщениями — просто скажи, что запланировать.</blockquote>
+
+<b>Попробуй прямо сейчас</b>:
+💬 "Завтра в 9:30 совещание с командой"
+или
+🎙️ Отправь голосовое сообщение, и я всё сделаю сам!"#;
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
@@ -124,19 +152,7 @@ pub const AUTO_SNOOZE_PROMPT: &str = r#"Настройте время автом
 
 Введите своё время для автоматического откладывания напоминаний:"#;
 
-pub fn setup_keyboard() -> teloxide::types::InlineKeyboardMarkup {
-    use teloxide::types::InlineKeyboardButton as Btn;
-    teloxide::types::InlineKeyboardMarkup::new(vec![
-        vec![Btn::callback("Время откладывания", "setup_snooze")],
-        vec![Btn::callback("Авто откладывание", "setup_auto")],
-        vec![Btn::callback("Время суток (UTC)", "setup_utc")],
-    ])
-}
-
-pub fn back_keyboard() -> teloxide::types::InlineKeyboardMarkup {
-    use teloxide::types::InlineKeyboardButton as Btn;
-    teloxide::types::InlineKeyboardMarkup::new(vec![vec![Btn::callback("⬅ Назад", "setup_menu")]])
-}
+// Клавиатуры setup_keyboard и back_keyboard перенесены в crate::bot::keyboards::common
 
 async fn command_utc(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     start_utc_flow(bot, msg.chat.id, dialogue, db).await

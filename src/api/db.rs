@@ -363,6 +363,150 @@ impl Db {
         }
         Ok(false)
     }
+
+    // ===== Reminder methods =====
+
+    /// Get all active reminders for a user, sorted by time.
+    pub async fn get_user_reminders(&self, user_id: i64) -> Result<Vec<Reminder>> {
+        use futures::TryStreamExt;
+        use mongodb::options::FindOptions;
+
+        let filter = doc! {
+            "id": user_id,
+            "status": { "$ne": "sent" }
+        };
+        let options = FindOptions::builder()
+            .sort(doc! { "time": 1 })
+            .build();
+
+        let cursor = self.reminders().find(filter, options).await?;
+        let reminders: Vec<Reminder> = cursor.try_collect().await?;
+        Ok(reminders)
+    }
+
+    /// Atomically claim a batch of due reminders for processing.
+    /// Sets status to "processing" and returns the claimed reminders.
+    /// This prevents race conditions when multiple scheduler cycles overlap.
+    pub async fn claim_due_reminders(&self, batch_size: i64) -> Result<Vec<Reminder>> {
+        use mongodb::options::FindOneAndUpdateOptions;
+        use mongodb::options::ReturnDocument;
+
+        let now = Utc::now();
+        let now_bson = mongodb::bson::DateTime::from_chrono(now);
+
+        // Filter: active OR (retry AND retry_at <= now)
+        let filter = doc! {
+            "$or": [
+                {
+                    "status": "active",
+                    "time": { "$lte": now_bson.clone() }
+                },
+                {
+                    "status": "retry",
+                    "retryAt": { "$lte": now_bson.clone() }
+                }
+            ]
+        };
+
+        let update = doc! {
+            "$set": { "status": "processing" }
+        };
+
+        let options = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        let mut claimed = Vec::new();
+        
+        // Claim up to batch_size reminders atomically
+        for _ in 0..batch_size {
+            match self.reminders().find_one_and_update(
+                filter.clone(),
+                update.clone(),
+                options.clone()
+            ).await? {
+                Some(reminder) => claimed.push(reminder),
+                None => break, // No more due reminders
+            }
+        }
+
+        Ok(claimed)
+    }
+
+    /// Update reminder time and reset to active (for recurring reminders).
+    pub async fn update_reminder_time(&self, rem_id: i32, new_time: DateTime<Utc>) -> Result<()> {
+        let filter = doc! { "remID": rem_id };
+        let update = doc! {
+            "$set": {
+                "time": mongodb::bson::DateTime::from_chrono(new_time),
+                "status": "active",
+                "retryCount": 0,
+                "retryAt": mongodb::bson::Bson::Null
+            }
+        };
+        self.reminders().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Mark reminder as sent.
+    pub async fn mark_reminder_sent(&self, rem_id: i32) -> Result<()> {
+        let filter = doc! { "remID": rem_id };
+        let update = doc! { "$set": { "status": "sent" } };
+        self.reminders().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Schedule reminder for retry with exponential backoff.
+    pub async fn schedule_retry(&self, rem_id: i32, retry_count: i32) -> Result<()> {
+        // Exponential backoff: 30s, 60s, 120s
+        let delay_secs = 30 * (1 << retry_count.min(3));
+        let retry_at = Utc::now() + chrono::Duration::seconds(delay_secs);
+
+        let filter = doc! { "remID": rem_id };
+        let update = doc! {
+            "$set": {
+                "status": "retry",
+                "retryCount": retry_count + 1,
+                "retryAt": mongodb::bson::DateTime::from_chrono(retry_at)
+            }
+        };
+        self.reminders().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Mark reminder as permanently failed (after max retries).
+    pub async fn mark_reminder_failed(&self, rem_id: i32) -> Result<()> {
+        let filter = doc! { "remID": rem_id };
+        let update = doc! { "$set": { "status": "failed" } };
+        self.reminders().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Recover stuck reminders (processing for too long).
+    pub async fn recover_stuck_reminders(&self, stuck_threshold_secs: i64) -> Result<i64> {
+        // For now, just reset any "processing" reminders back to "active"
+        // In production, you'd track processing_started_at
+        let filter = doc! { "status": "processing" };
+        let update = doc! { "$set": { "status": "active" } };
+        let result = self.reminders().update_many(filter, update, None).await?;
+        Ok(result.modified_count as i64)
+    }
+
+    /// Delete a reminder by rem_id for a specific user.
+    pub async fn delete_reminder(&self, user_id: i64, rem_id: i32) -> Result<bool> {
+        let filter = doc! {
+            "id": user_id,
+            "remID": rem_id
+        };
+        let result = self.reminders().delete_one(filter, None).await?;
+        Ok(result.deleted_count > 0)
+    }
+
+    /// Find a reminder by rem_id.
+    pub async fn find_reminder(&self, rem_id: i32) -> Result<Option<Reminder>> {
+        let filter = doc! { "remID": rem_id };
+        Ok(self.reminders().find_one(filter, None).await?)
+    }
 }
 
 /// Helper to add months to a DateTime.
@@ -463,6 +607,16 @@ pub struct Reminder {
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     pub snooze_time: Option<DateTime<Utc>>,
+    /// Retry count for failed sends
+    #[serde(rename = "retryCount", default)]
+    pub retry_count: i32,
+    /// Time for next retry attempt
+    #[serde(
+        rename = "retryAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    pub retry_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

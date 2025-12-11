@@ -30,15 +30,33 @@ pub async fn build_deps() -> anyhow::Result<DependencyMap> {
 pub fn schema() -> UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 
-        let messages = Update::filter_message()
-                .enter_dialogue::<Message, InMemStorage<AppState>, AppState>()
-                .branch(handlers::commands::router())
-                .branch(handlers::text::router());
+    let messages = Update::filter_message()
+        .enter_dialogue::<Message, InMemStorage<AppState>, AppState>()
+        .branch(handlers::commands::router())
+        .branch(handlers::text::router())
+        // Handle reminder editing state
+        .branch(
+            dptree::case![AppState::AwaitingReminderEdit { pending }]
+                .filter(filters::private_chat_msg)
+                .endpoint(handlers::reminder::handle_reminder_edit_text),
+        )
+        // Handle reminder deletion state
+        .branch(
+            dptree::case![AppState::AwaitingReminderDeletion]
+                .filter(filters::private_chat_msg)
+                .endpoint(handlers::reminder::handle_deletion_input),
+        )
+        // Handle idle state - any text treated as reminder (lowest priority)
+        .branch(
+            dptree::case![AppState::Idle]
+                .filter(filters::private_chat_msg)
+                .endpoint(handlers::reminder::handle_idle_text),
+        );
 
-        let callbacks = Update::filter_callback_query()
-                .filter(filters::private_chat_cq)
-                .enter_dialogue::<CallbackQuery, InMemStorage<AppState>, AppState>()
-                .branch(dptree::endpoint(handlers::callbacks::handle_callback));
+    let callbacks = Update::filter_callback_query()
+        .filter(filters::private_chat_cq)
+        .enter_dialogue::<CallbackQuery, InMemStorage<AppState>, AppState>()
+        .branch(dptree::endpoint(handlers::callbacks::handle_callback));
 
     dptree::entry().branch(messages).branch(callbacks)
 }

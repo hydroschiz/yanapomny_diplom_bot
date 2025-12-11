@@ -3,54 +3,31 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton as Btn, InlineKeyboardMarkup, ParseMode};
+use teloxide::types::ParseMode;
 
 use crate::api::db::Db;
-use crate::api::payments::{PaymentService, get_tariff};
+use crate::api::payments::{get_tariff, PaymentService};
+use crate::bot::keyboards::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
 use crate::bot::router::{AppDialogue, HandlerResult};
 use crate::bot::states::AppState;
 
-/// Build the main payment menu keyboard.
-pub fn pay_menu_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
-        vec![Btn::callback("3 месяца за 195₽ (65₽/мес)", "pay_select:3")],
-        vec![Btn::callback("6 месяцев за 360₽ (60₽/мес)", "pay_select:6")],
-        vec![Btn::callback("12 месяцев за 660₽ (55₽/мес)", "pay_select:12")],
-        vec![Btn::url("О сервисе", "https://t.me/yanapomnyu".parse().unwrap())],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
-    ])
-}
-
-/// Build provider selection keyboard.
-pub fn pay_provider_keyboard(months: i32) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
-        vec![Btn::callback("💳 Карта, SberPay, ЮMoney", format!("pay_yk:{}", months))],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
-    ])
-}
-
-/// Build payment link keyboard (after provider selection).
-pub fn pay_link_keyboard(url: &str, months: i32) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
-        vec![Btn::url("💳 Карта, SberPay, ЮMoney", url.parse().unwrap())],
-        vec![Btn::callback("🔄 Проверить оплату", format!("pay_check:{}", months))],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
-    ])
-}
+// Клавиатуры платежей перенесены в crate::bot::keyboards::pay
 
 /// Format subscription status message.
 pub fn format_subscription_status(is_active: bool, expiry: Option<&str>) -> String {
     let status = if is_active { "активна ✅" } else { "неактивна ❌" };
     let expiry_line = if is_active {
-        expiry.map(|e| format!("\n<b>Действует до:</b> {}", e)).unwrap_or_default()
+        expiry
+            .map(|e| format!("\n📅 <b>Действует до:</b> {}", e))
+            .unwrap_or_default()
     } else {
         String::new()
     };
 
     format!(
-        "<b>Оплата подписки — @yanapomnyu_bot</b>\n\n\
-         <b>Статус:</b> {}{}\n\n\
-         <b>Продлить подписку:</b>",
+        "👛 <b>Выберите срок, на который хотите оформить подписку</b>\n\n\
+         📧 <b>Статус:</b> {}{}\n\n\
+         <i>Совет:</i> <b>выбирайте более длительную подписку</b>, чтобы снизить стоимость одного месяца.",
         status, expiry_line
     )
 }
@@ -58,17 +35,17 @@ pub fn format_subscription_status(is_active: bool, expiry: Option<&str>) -> Stri
 /// Format tariff selection message.
 pub fn format_tariff_message(months: i32) -> String {
     let tariff = get_tariff(months);
-    let (price, period) = match tariff {
-        Some(t) => (t.price, format!("{} мес.", t.months)),
-        None => (0, "?".to_string()),
+    let (price, period, price_per_month) = match tariff {
+        Some(t) => (t.price, format!("{} месяца", t.months), t.price / t.months),
+        None => (0, "?".to_string(), 0),
     };
 
     format!(
-        "Вы оплачиваете подписку на <b>{}</b>\n\n\
-         💸 <b>К оплате:</b> {} ₽\n\n\
-         Оплачивая подписку, вы принимаете условия пользовательского соглашения.\n\n\
+        "Вы оплачиваете <b>подписку на {}</b>\n\n\
+         💸 <b>К оплате:</b> {}₽ ({}₽ за мес)\n\n\
+         Оплачивая подписку, вы <a href=\"https://telegra.ph/Polzovatelskoe-soglashenie-i-publichnaya-oferta-12-03\">принимаете условия пользовательского соглашения</a>.\n\n\
          Для оплаты воспользуйтесь кнопками под этим сообщением.",
-        period, price
+        period, price, price_per_month
     )
 }
 

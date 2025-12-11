@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{offset::Offset, TimeZone};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use teloxide::prelude::*;
@@ -7,19 +8,10 @@ use teloxide::types::ParseMode;
 
 use crate::api::db::Db;
 use crate::bot::{
+    keyboards::{common::OFFSETS, utc_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
-
-use chrono::{TimeZone, offset::Offset};
-
-pub static OFFSETS: &[&str] = &[
-    "-12:00", "-11:00", "-10:00", "-09:30", "-09:00", "-08:00", "-07:00", "-06:00", "-05:00",
-    "-04:30", "-04:00", "-03:30", "-03:00", "-02:00", "-01:00", "+00:00", "+01:00", "+02:00",
-    "+03:00", "+03:30", "+04:00", "+04:30", "+05:00", "+05:30", "+05:45", "+06:00", "+06:30",
-    "+07:00", "+08:00", "+08:30", "+08:45", "+09:00", "+09:30", "+10:00", "+10:30", "+11:00",
-    "+12:00",
-];
 
 static OFFSET_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -118,7 +110,7 @@ pub async fn handle_utc_input(
         chat_id,
         "Не удалось определить часовой пояс. Укажите в формате UTC+3 или назовите город. Чтобы выйти, нажмите «Назад».",
     )
-    .reply_markup(super::callbacks::utc_keyboard())
+    .reply_markup(utc_keyboard())
     .parse_mode(ParseMode::Html)
     .await?;
 

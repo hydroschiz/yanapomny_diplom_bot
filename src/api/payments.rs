@@ -330,12 +330,12 @@ impl PaymentService {
         let _ = self.cache.release_fulfill_lock(payment_id).await;
 
         // Notify user
-        let expiry_str = new_expiry.format("%d.%m.%Y").to_string();
+        let expiry_str = new_expiry.format("%Y-%m-%d %H:%M:%S UTC").to_string();
         let message = format!(
-            "✅ <b>Спасибо за покупку подписки!</b>\n\n\
-             <b>Статус:</b> активна\n\
-             <b>Действует до:</b> {}\n\n\
-             Узнай больше о Яне через команду /yan.",
+            "🎉 <b>Спасибо за покупку подписки</b>!\n\n\
+             📧 <b>Статус</b>: активна\n\
+             📅 <b>Действует до</b>: {}\n\n\
+             Если что-то непонятно — воспользуйтесь командой: /help — полезная информация и поддержка 💬",
             expiry_str
         );
 

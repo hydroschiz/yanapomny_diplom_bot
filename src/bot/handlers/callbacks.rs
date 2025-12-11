@@ -5,15 +5,15 @@ use teloxide::prelude::*;
 use crate::api::db::Db;
 use crate::api::payments::PaymentService;
 use crate::bot::{
+    keyboards::{back_keyboard, setup_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
 
 use super::commands::{
-    back_keyboard, setup_keyboard, start_utc_flow, AUTO_SNOOZE_PROMPT, SETUP_PROMPT,
-    SNOOZE_PROMPT, UTC_SUCCESS_MESSAGE,
+    start_utc_flow, AUTO_SNOOZE_PROMPT, SETUP_PROMPT, SNOOZE_PROMPT, UTC_SUCCESS_MESSAGE,
 };
-use super::text::{human_readable_auto, human_readable_snooze, normalize_offset, OFFSETS};
+use super::text::{human_readable_auto, human_readable_snooze, normalize_offset};
 
 pub async fn handle_callback(
     bot: Bot,
@@ -114,6 +114,37 @@ pub async fn handle_callback(
         return super::pay::handle_pay_callback(bot, cq, dialogue, db, payment_svc).await;
     }
 
+    // Handle text confirmation callbacks (before LLM)
+    match data.as_str() {
+        "text_confirm" => {
+            return super::reminder::handle_text_confirm(bot, cq, dialogue, db).await;
+        }
+        "text_cancel" => {
+            return super::reminder::handle_text_cancel(bot, cq, dialogue).await;
+        }
+        _ => {}
+    }
+
+    // Handle reminder callbacks (after LLM)
+    match data.as_str() {
+        "reminder_confirm" => {
+            return super::reminder::handle_reminder_confirm(bot, cq, dialogue, db).await;
+        }
+        "reminder_edit" => {
+            return super::reminder::handle_reminder_edit(bot, cq, dialogue).await;
+        }
+        "reminder_cancel" => {
+            return super::reminder::handle_reminder_cancel(bot, cq, dialogue).await;
+        }
+        "reminder_delete_start" => {
+            return super::reminder::handle_delete_start(bot, cq, dialogue).await;
+        }
+        "reminder_delete_back" => {
+            return super::reminder::handle_delete_back(bot, cq, dialogue, db).await;
+        }
+        _ => {}
+    }
+
     // Unknown callback data: send quick error.
     bot.answer_callback_query(cq.id)
         .text("Не удалось обработать выбор. Попробуйте снова.")
@@ -121,22 +152,4 @@ pub async fn handle_callback(
     Ok(())
 }
 
-/// Inline keyboard with UTC offsets and control buttons.
-pub fn utc_keyboard() -> teloxide::types::InlineKeyboardMarkup {
-    use teloxide::types::InlineKeyboardButton as Btn;
-
-    let mut rows: Vec<Vec<Btn>> = Vec::new();
-    for chunk in OFFSETS.chunks(4) {
-        let row = chunk
-            .iter()
-            .map(|o| {
-                let label = format!("UTC{}", o);
-                Btn::callback(label, format!("utc_set:{}", o))
-            })
-            .collect();
-        rows.push(row);
-    }
-
-    rows.push(vec![Btn::callback("⬅ Назад", "utc_cancel")]);
-    teloxide::types::InlineKeyboardMarkup::new(rows)
-}
+// Клавиатура utc_keyboard перенесена в crate::bot::keyboards::common
