@@ -98,6 +98,13 @@ pub async fn run() -> anyhow::Result<()> {
     info!("Starting reminder scheduler...");
     scheduler::start_scheduler(bot.clone(), db.clone());
 
+    // === 6.1 Планировщик проверки подписок ===
+    // Каждый час проверяет подписки:
+    // - Отправляет предупреждения за 7 дней до истечения
+    // - Удаляет напоминания при истечении подписки
+    info!("Starting subscription scheduler...");
+    scheduler::start_subscription_scheduler(bot.clone(), db.clone());
+
     // === 7. Telegram Dispatcher ===
     info!("Starting Telegram bot dispatcher...");
 

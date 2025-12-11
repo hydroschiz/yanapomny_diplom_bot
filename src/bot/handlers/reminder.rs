@@ -70,6 +70,19 @@ pub async fn handle_idle_text(
         return Ok(());
     }
 
+    // Check if user has active subscription
+    if !db.is_subscription_active(chat_id.0).await? {
+        let no_subscription_message = 
+            "⚠️ <b>Подписка не активна</b>\n\n\
+            Для создания напоминаний необходима активная подписка.\n\n\
+            Используйте команду /pay для оформления подписки.";
+        
+        bot.send_message(chat_id, no_subscription_message)
+            .parse_mode(ParseMode::Html)
+            .await?;
+        return Ok(());
+    }
+
     // Ask for confirmation BEFORE sending to LLM
     let confirmation_text = format!(
         "📝 <b>Создать напоминание из этого текста?</b>\n\n\

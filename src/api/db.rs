@@ -507,6 +507,110 @@ impl Db {
         let filter = doc! { "remID": rem_id };
         Ok(self.reminders().find_one(filter, None).await?)
     }
+
+    // ===== Subscription expiry methods =====
+
+    /// Get users whose subscriptions expire within N days.
+    /// Returns users where nextPaymentDate is between now and now + days.
+    pub async fn get_users_with_expiring_subscriptions(&self, days_before: i32) -> Result<Vec<UserRecord>> {
+        use futures::TryStreamExt;
+
+        let now = Utc::now();
+        let expiry_check_date = now + chrono::Duration::days(days_before as i64);
+
+        let filter = doc! {
+            "nextPaymentDate": {
+                "$gt": mongodb::bson::DateTime::from_chrono(now),
+                "$lte": mongodb::bson::DateTime::from_chrono(expiry_check_date)
+            },
+            // Only get users who haven't been warned yet
+            "expiryWarned": { "$ne": true }
+        };
+
+        let cursor = self.records().find(filter, None).await?;
+        let records: Vec<UserRecord> = cursor.try_collect().await?;
+        Ok(records)
+    }
+
+    /// Mark that user has been warned about subscription expiry.
+    pub async fn mark_subscription_warning_sent(&self, id: i64) -> Result<()> {
+        let filter = doc! { "id": id };
+        let update = doc! {
+            "$set": {
+                "expiryWarned": true,
+                "expiryWarnedAt": mongodb::bson::DateTime::from_chrono(Utc::now())
+            }
+        };
+        self.records().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Get users with expired subscriptions (nextPaymentDate < now).
+    pub async fn get_expired_subscriptions(&self) -> Result<Vec<UserRecord>> {
+        use futures::TryStreamExt;
+
+        let now = Utc::now();
+
+        let filter = doc! {
+            "nextPaymentDate": { "$lt": mongodb::bson::DateTime::from_chrono(now) },
+            // Only get users whose reminders haven't been deleted yet
+            "remindersDeleted": { "$ne": true }
+        };
+
+        let cursor = self.records().find(filter, None).await?;
+        let records: Vec<UserRecord> = cursor.try_collect().await?;
+        Ok(records)
+    }
+
+    /// Delete all reminders for a user and mark as deleted in their record.
+    pub async fn delete_all_user_reminders(&self, user_id: i64) -> Result<i64> {
+        // Delete all reminders (active, retry status - not sent)
+        let filter = doc! {
+            "id": user_id,
+            "status": { "$ne": "sent" }
+        };
+        let result = self.reminders().delete_many(filter, None).await?;
+
+        // Mark in record that reminders were deleted
+        let record_filter = doc! { "id": user_id };
+        let record_update = doc! {
+            "$set": {
+                "remindersDeleted": true,
+                "remindersDeletedAt": mongodb::bson::DateTime::from_chrono(Utc::now())
+            }
+        };
+        self.records().update_one(record_filter, record_update, None).await?;
+
+        Ok(result.deleted_count as i64)
+    }
+
+    /// Reset expiry warning flags when subscription is renewed.
+    /// Should be called after successful payment.
+    pub async fn reset_expiry_flags(&self, id: i64) -> Result<()> {
+        let filter = doc! { "id": id };
+        let update = doc! {
+            "$set": {
+                "expiryWarned": false,
+                "remindersDeleted": false
+            },
+            "$unset": {
+                "expiryWarnedAt": "",
+                "remindersDeletedAt": ""
+            }
+        };
+        self.records().update_one(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Count active reminders for a user.
+    pub async fn count_user_reminders(&self, user_id: i64) -> Result<i64> {
+        let filter = doc! {
+            "id": user_id,
+            "status": { "$ne": "sent" }
+        };
+        let count = self.reminders().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
 }
 
 /// Helper to add months to a DateTime.

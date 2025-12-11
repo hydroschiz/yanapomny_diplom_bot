@@ -308,6 +308,11 @@ impl PaymentService {
         // Extend subscription
         let new_expiry = self.db.extend_subscription(user_id, months).await?;
 
+        // Reset expiry warning flags (so user can get warned again next time)
+        if let Err(e) = self.db.reset_expiry_flags(user_id).await {
+            warn!(user_id = user_id, error = %e, "failed to reset expiry flags");
+        }
+
         // Save transaction
         let tariff = get_tariff(months);
         let tx = PaymentTransaction {
