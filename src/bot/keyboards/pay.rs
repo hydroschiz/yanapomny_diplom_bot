@@ -16,7 +16,7 @@ pub fn pay_menu_keyboard() -> InlineKeyboardMarkup {
             "О сервисе",
             "https://t.me/yanapomnyu".parse().unwrap(),
         )],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
+        vec![Btn::callback("👤 Профиль", "profile")],
     ])
 }
 
@@ -30,7 +30,7 @@ pub fn pay_provider_keyboard(months: i32) -> InlineKeyboardMarkup {
             "💳 Карта, SberPay, ЮMoney",
             format!("pay_yk:{}", months),
         )],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
+        vec![Btn::callback("⬅ Назад", "pay_menu"), Btn::callback("👤 Профиль", "profile")],
     ])
 }
 
@@ -46,6 +46,6 @@ pub fn pay_link_keyboard(url: &str, months: i32) -> InlineKeyboardMarkup {
             "🔄 Проверить оплату",
             format!("pay_check:{}", months),
         )],
-        vec![Btn::callback("⬅ Назад", "pay_cancel")],
+        vec![Btn::callback("⬅ Назад", "pay_menu"), Btn::callback("👤 Профиль", "profile")],
     ])
 }

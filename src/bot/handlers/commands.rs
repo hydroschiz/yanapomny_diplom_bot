@@ -12,20 +12,26 @@ use crate::bot::{
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
 pub enum Command {
-    #[command(description = "Старт")]
+    #[command(description = "Начать")]
     Start,
-    #[command(description = "Помощь")]
+    #[command(description = "Дополнительная информация")]
     Help,
-    #[command(description = "О Яне")]
+    #[command(description = "ИИ-помощник Yan")]
     Yan,
     #[command(description = "Настройка часового пояса")]
     Utc,
-    #[command(description = "Настройки пользователя")]
+    #[command(description = "Настройки")]
     Setup,
-    #[command(description = "Оплата подписки")]
+    #[command(description = "Оплата")]
     Pay,
-    #[command(description = "Список напоминаний")]
+    #[command(description = "Список активных напоминаний")]
     List,
+    #[command(description = "Уведомления о новых видео")]
+    Subs,
+    #[command(description = "Профиль и подписка")]
+    Profile,
+    #[command(description = "Реферальная ссылка")]
+    Ref,
 }
 
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
@@ -41,7 +47,10 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
             .branch(dptree::case![Command::Utc].endpoint(command_utc))
             .branch(dptree::case![Command::Setup].endpoint(command_setup))
             .branch(dptree::case![Command::Pay].endpoint(super::pay::command_pay))
-            .branch(dptree::case![Command::List].endpoint(super::reminder::handle_list_command)),
+            .branch(dptree::case![Command::List].endpoint(super::reminder::handle_list_command))
+            .branch(dptree::case![Command::Subs].endpoint(super::channels::command_subs))
+            .branch(dptree::case![Command::Profile].endpoint(super::profile::handle_profile_command))
+            .branch(dptree::case![Command::Ref].endpoint(super::referral::command_ref)),
     )
 }
 
@@ -77,6 +86,7 @@ async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
+        .reply_markup(crate::bot::keyboards::profile_back_keyboard())
         .await?;
 
     Ok(())
@@ -99,6 +109,7 @@ async fn command_yan(bot: Bot, msg: Message) -> HandlerResult {
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
+        .reply_markup(crate::bot::keyboards::profile_back_keyboard())
         .await?;
 
     Ok(())
@@ -216,11 +227,24 @@ async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) ->
 
 📢 Новости и обновления — в канале @yanapomnyu"#;
 
+    let user_id = msg.chat.id.0;
+    
+    // Handle referral payload: /start ref_<referrer_id>
+    if let Some(msg_text) = msg.text() {
+        if let Some(payload) = msg_text.split_whitespace().nth(1) {
+            if let Some(rest) = payload.strip_prefix("ref_") {
+                if let Ok(referrer_id) = rest.parse::<i64>() {
+                    let _ = db.record_referral(referrer_id, user_id).await;
+                }
+            }
+        }
+    }
+
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
         .await?;
 
-    let user = db.ensure_user(msg.chat.id.0).await?;
+    let user = db.ensure_user(user_id).await?;
     if user.time_zone.is_empty() && (user.utc.is_empty() || user.utc.to_lowercase() == "nil") {
         start_utc_flow(bot, msg.chat.id, dialogue, db).await?;
     }

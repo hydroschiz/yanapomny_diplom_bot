@@ -37,4 +37,6 @@ pub enum AppState {
     AwaitingReminderEdit { pending: PendingReminder },
     /// User is in reminder deletion flow, awaiting reminder number.
     AwaitingReminderDeletion,
+    /// User is in channel subscription deletion flow, awaiting subscription number.
+    AwaitingSubDeleteNum,
 }

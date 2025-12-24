@@ -82,7 +82,7 @@ pub async fn handle_pay_callback(
     bot: Bot,
     cq: CallbackQuery,
     dialogue: AppDialogue,
-    _db: Db,
+    db: Db,
     payment_svc: Arc<PaymentService>,
 ) -> HandlerResult {
     let data = match cq.data.as_ref() {
@@ -100,6 +100,30 @@ pub async fn handle_pay_callback(
         dialogue.update(AppState::Idle).await?;
         bot.answer_callback_query(cq.id.clone()).await?;
         bot.send_message(chat_id, "Оплата отменена.")
+            .await?;
+        return Ok(());
+    }
+
+    // pay_menu - show payment menu
+    if data == "pay_menu" {
+        bot.answer_callback_query(cq.id.clone()).await?;
+        dialogue.update(AppState::Idle).await?;
+        
+        let record = db.ensure_record(user_id).await?;
+        let status = if record.is_active() {
+            format!("💎 Подписка активна до: <b>{}</b>\n\n", record.next_payment_date.format("%d.%m.%Y"))
+        } else {
+            String::new()
+        };
+        
+        let message = format!(
+            "{}Выберите тариф подписки:",
+            status
+        );
+        
+        bot.send_message(chat_id, message)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(pay_menu_keyboard())
             .await?;
         return Ok(());
     }

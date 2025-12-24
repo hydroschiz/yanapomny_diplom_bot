@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use mongodb::{
     Client, Collection, Database, IndexModel,
     bson::{
@@ -17,6 +17,55 @@ const USERS_COLLECTION: &str = "users";
 const REMINDERS_COLLECTION: &str = "reminds";
 const RECORDS_COLLECTION: &str = "records";
 const TRANSACTIONS_COLLECTION: &str = "transactions";
+const CHANNEL_SUBS_COLLECTION: &str = "channel_subscriptions";
+const REFERRALS_COLLECTION: &str = "referrals";
+
+/// Platform type for channel subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Twitch,
+    Youtube,
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Platform::Twitch => write!(f, "Twitch"),
+            Platform::Youtube => write!(f, "YouTube"),
+        }
+    }
+}
+
+/// Channel subscription for Twitch/YouTube notifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelSubscription {
+    /// User's Telegram chat ID.
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    /// Platform: twitch or youtube.
+    pub platform: Platform,
+    /// Channel ID on the platform (username for Twitch, channel ID for YouTube).
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    /// Channel display name.
+    #[serde(rename = "channelName")]
+    pub channel_name: String,
+    /// Original URL provided by user.
+    pub url: String,
+    /// Subscription number for this user (1, 2, 3...).
+    #[serde(rename = "subNum")]
+    pub sub_num: i32,
+    /// When the subscription was created.
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    /// Last known stream/video ID to detect new content.
+    #[serde(rename = "lastContentId", default)]
+    pub last_content_id: Option<String>,
+    /// Whether the channel is currently live (for Twitch).
+    #[serde(rename = "isLive", default)]
+    pub is_live: bool,
+}
 
 /// New payment transaction for YooKassa payments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +102,27 @@ pub struct PaymentTransaction {
     /// Payment provider (yookassa, etc).
     #[serde(default)]
     pub provider: Option<String>,
+}
+
+/// Referral record linking referrer to invited user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Referral {
+    /// ID of user who shared the referral link.
+    #[serde(rename = "referrerId")]
+    pub referrer_id: i64,
+    /// ID of user who was invited.
+    #[serde(rename = "invitedId")]
+    pub invited_id: i64,
+    /// When the referral was recorded.
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    /// When reward was given to referrer (None if not yet rewarded).
+    #[serde(
+        rename = "rewardedAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    pub rewarded_at: Option<DateTime<Utc>>,
 }
 
 /// MongoDB wrapper that keeps all DB-specific logic in one place.
@@ -99,6 +169,14 @@ impl Db {
         self.db.collection(TRANSACTIONS_COLLECTION)
     }
 
+    pub fn channel_subscriptions(&self) -> Collection<ChannelSubscription> {
+        self.db.collection(CHANNEL_SUBS_COLLECTION)
+    }
+
+    pub fn referrals(&self) -> Collection<Referral> {
+        self.db.collection(REFERRALS_COLLECTION)
+    }
+
     pub async fn ensure_user(&self, id: i64) -> Result<User> {
         if let Some(user) = self.find_user(id).await? {
             return Ok(user);
@@ -134,6 +212,28 @@ impl Db {
                 IndexModel::builder()
                     .keys(doc! {"remID": 1})
                     .options(IndexOptions::builder().build())
+                    .build(),
+                None,
+            )
+            .await?;
+
+        // Channel subscriptions index on userId for fast lookups.
+        self.channel_subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"userId": 1})
+                    .options(IndexOptions::builder().build())
+                    .build(),
+                None,
+            )
+            .await?;
+
+        // Compound index for unique channel per user.
+        self.channel_subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"userId": 1, "platform": 1, "channelId": 1})
+                    .options(IndexOptions::builder().unique(true).build())
                     .build(),
                 None,
             )
@@ -482,6 +582,31 @@ impl Db {
         Ok(())
     }
 
+    /// Snooze a reminder by a given number of minutes.
+    /// Calculates new time and updates the reminder status to "snoozed".
+    pub async fn snooze_reminder(&self, rem_id: i32, minutes: i64) -> Result<DateTime<Utc>> {
+        let new_time = Utc::now() + chrono::Duration::minutes(minutes);
+        let filter = doc! { "remID": rem_id };
+        let update = doc! {
+            "$set": {
+                "time": mongodb::bson::DateTime::from_chrono(new_time),
+                "status": "snoozed",
+                "snoozeTime": mongodb::bson::DateTime::from_chrono(new_time),
+                "retryCount": 0,
+                "retryAt": mongodb::bson::Bson::Null
+            }
+        };
+        self.reminders().update_one(filter, update, None).await?;
+        Ok(new_time)
+    }
+
+    /// Complete (delete) a reminder by rem_id.
+    pub async fn complete_reminder(&self, rem_id: i32) -> Result<bool> {
+        let filter = doc! { "remID": rem_id };
+        let result = self.reminders().delete_one(filter, None).await?;
+        Ok(result.deleted_count > 0)
+    }
+
     /// Recover stuck reminders (processing for too long).
     pub async fn recover_stuck_reminders(&self, stuck_threshold_secs: i64) -> Result<i64> {
         // For now, just reset any "processing" reminders back to "active"
@@ -506,6 +631,83 @@ impl Db {
     pub async fn find_reminder(&self, rem_id: i32) -> Result<Option<Reminder>> {
         let filter = doc! { "remID": rem_id };
         Ok(self.reminders().find_one(filter, None).await?)
+    }
+
+    // ===== Profile statistics methods =====
+
+    /// Count active reminders for a user.
+    pub async fn count_active_reminders(&self, user_id: i64) -> Result<i64> {
+        let filter = doc! {
+            "id": user_id,
+            "status": { "$nin": ["sent", "failed"] }
+        };
+        let count = self.reminders().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
+
+    /// Count reminders created this month for a user.
+    pub async fn count_reminders_this_month(&self, user_id: i64) -> Result<i64> {
+        let now = Utc::now();
+        let start_of_month = now
+            .with_day(1)
+            .unwrap_or(now)
+            .with_hour(0)
+            .unwrap_or(now)
+            .with_minute(0)
+            .unwrap_or(now)
+            .with_second(0)
+            .unwrap_or(now);
+
+        let filter = doc! {
+            "id": user_id,
+            "time": { "$gte": mongodb::bson::DateTime::from_chrono(start_of_month) }
+        };
+        let count = self.reminders().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
+
+    /// Count reminders created last month for a user.
+    pub async fn count_reminders_last_month(&self, user_id: i64) -> Result<i64> {
+        let now = Utc::now();
+        let start_of_this_month = now
+            .with_day(1)
+            .unwrap_or(now)
+            .with_hour(0)
+            .unwrap_or(now)
+            .with_minute(0)
+            .unwrap_or(now)
+            .with_second(0)
+            .unwrap_or(now);
+        
+        let start_of_last_month = start_of_this_month - chrono::Duration::days(
+            start_of_this_month.day() as i64
+        );
+        let start_of_last_month = start_of_last_month.with_day(1).unwrap_or(start_of_last_month);
+
+        let filter = doc! {
+            "id": user_id,
+            "time": {
+                "$gte": mongodb::bson::DateTime::from_chrono(start_of_last_month),
+                "$lt": mongodb::bson::DateTime::from_chrono(start_of_this_month)
+            }
+        };
+        let count = self.reminders().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
+
+    /// Get the last (most recent) reminder for a user.
+    pub async fn get_last_reminder(&self, user_id: i64) -> Result<Option<Reminder>> {
+        use mongodb::options::FindOneOptions;
+
+        let filter = doc! {
+            "id": user_id,
+            "status": { "$nin": ["sent", "failed"] }
+        };
+        let options = FindOneOptions::builder()
+            .sort(doc! { "time": 1 })  // Get the next upcoming reminder
+            .build();
+
+        Ok(self.reminders().find_one(filter, options).await?)
     }
 
     // ===== Subscription expiry methods =====
@@ -610,6 +812,228 @@ impl Db {
         };
         let count = self.reminders().count_documents(filter, None).await?;
         Ok(count as i64)
+    }
+
+    // ===== Channel subscriptions methods =====
+
+    /// Get all channel subscriptions for a user.
+    pub async fn get_user_channel_subs(&self, user_id: i64) -> Result<Vec<ChannelSubscription>> {
+        use futures::TryStreamExt;
+
+        let filter = doc! { "userId": user_id };
+        let cursor = self.channel_subscriptions().find(filter, None).await?;
+        let subs: Vec<ChannelSubscription> = cursor.try_collect().await?;
+        Ok(subs)
+    }
+
+    /// Get the next subscription number for a user.
+    async fn next_sub_num(&self, user_id: i64) -> Result<i32> {
+        let subs = self.get_user_channel_subs(user_id).await?;
+        let max_num = subs.iter().map(|s| s.sub_num).max().unwrap_or(0);
+        Ok(max_num + 1)
+    }
+
+    /// Add a new channel subscription.
+    pub async fn add_channel_sub(
+        &self,
+        user_id: i64,
+        platform: Platform,
+        channel_id: String,
+        channel_name: String,
+        url: String,
+    ) -> Result<ChannelSubscription> {
+        let sub_num = self.next_sub_num(user_id).await?;
+
+        let sub = ChannelSubscription {
+            user_id,
+            platform,
+            channel_id,
+            channel_name,
+            url,
+            sub_num,
+            created_at: Utc::now(),
+            last_content_id: None,
+            is_live: false,
+        };
+
+        self.channel_subscriptions().insert_one(&sub, None).await?;
+        Ok(sub)
+    }
+
+    /// Check if user already subscribed to this channel.
+    pub async fn is_channel_subscribed(
+        &self,
+        user_id: i64,
+        platform: Platform,
+        channel_id: &str,
+    ) -> Result<bool> {
+        let filter = doc! {
+            "userId": user_id,
+            "platform": mongodb::bson::to_bson(&platform)?,
+            "channelId": channel_id
+        };
+        let count = self.channel_subscriptions().count_documents(filter, None).await?;
+        Ok(count > 0)
+    }
+
+    /// Delete a channel subscription by user_id and sub_num.
+    pub async fn delete_channel_sub(&self, user_id: i64, sub_num: i32) -> Result<bool> {
+        let filter = doc! {
+            "userId": user_id,
+            "subNum": sub_num
+        };
+        let result = self.channel_subscriptions().delete_one(filter, None).await?;
+        
+        // Renumber remaining subscriptions
+        if result.deleted_count > 0 {
+            self.renumber_channel_subs(user_id).await?;
+        }
+        
+        Ok(result.deleted_count > 0)
+    }
+
+    /// Renumber subscriptions after deletion to maintain sequential order.
+    async fn renumber_channel_subs(&self, user_id: i64) -> Result<()> {
+        use futures::TryStreamExt;
+        use mongodb::options::FindOptions;
+
+        let filter = doc! { "userId": user_id };
+        let options = FindOptions::builder().sort(doc! { "subNum": 1 }).build();
+        let cursor = self.channel_subscriptions().find(filter, options).await?;
+        let subs: Vec<ChannelSubscription> = cursor.try_collect().await?;
+
+        for (idx, sub) in subs.iter().enumerate() {
+            let new_num = (idx + 1) as i32;
+            if sub.sub_num != new_num {
+                let filter = doc! {
+                    "userId": user_id,
+                    "platform": mongodb::bson::to_bson(&sub.platform)?,
+                    "channelId": &sub.channel_id
+                };
+                let update = doc! { "$set": { "subNum": new_num } };
+                self.channel_subscriptions().update_one(filter, update, None).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get all unique channel subscriptions grouped by channel for the scheduler.
+    pub async fn get_all_channel_subs(&self) -> Result<Vec<ChannelSubscription>> {
+        use futures::TryStreamExt;
+
+        let cursor = self.channel_subscriptions().find(doc! {}, None).await?;
+        let subs: Vec<ChannelSubscription> = cursor.try_collect().await?;
+        Ok(subs)
+    }
+
+    /// Update the last content ID and live status for a channel.
+    pub async fn update_channel_content(
+        &self,
+        platform: Platform,
+        channel_id: &str,
+        last_content_id: Option<String>,
+        is_live: bool,
+    ) -> Result<()> {
+        let filter = doc! {
+            "platform": mongodb::bson::to_bson(&platform)?,
+            "channelId": channel_id
+        };
+        let update = doc! {
+            "$set": {
+                "lastContentId": last_content_id,
+                "isLive": is_live
+            }
+        };
+        self.channel_subscriptions().update_many(filter, update, None).await?;
+        Ok(())
+    }
+
+    /// Get all user IDs subscribed to a specific channel.
+    pub async fn get_channel_subscribers(
+        &self,
+        platform: Platform,
+        channel_id: &str,
+    ) -> Result<Vec<i64>> {
+        use futures::TryStreamExt;
+
+        let filter = doc! {
+            "platform": mongodb::bson::to_bson(&platform)?,
+            "channelId": channel_id
+        };
+        let cursor = self.channel_subscriptions().find(filter, None).await?;
+        let subs: Vec<ChannelSubscription> = cursor.try_collect().await?;
+        Ok(subs.into_iter().map(|s| s.user_id).collect())
+    }
+
+    /// Count user's channel subscriptions.
+    pub async fn count_user_channel_subs(&self, user_id: i64) -> Result<i64> {
+        let filter = doc! { "userId": user_id };
+        let count = self.channel_subscriptions().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
+
+    // ===== Referral methods =====
+
+    /// Record a referral when a new user is invited.
+    /// Returns true if the referral was recorded, false if already exists or self-referral.
+    pub async fn record_referral(&self, referrer_id: i64, invited_id: i64) -> Result<bool> {
+        // Don't allow self-referral
+        if referrer_id == invited_id {
+            return Ok(false);
+        }
+
+        // Check if already recorded
+        let filter = doc! { "invitedId": invited_id };
+        if self.referrals().find_one(filter, None).await?.is_some() {
+            return Ok(false);
+        }
+
+        // Insert referral record
+        let referral = Referral {
+            referrer_id,
+            invited_id,
+            created_at: Utc::now(),
+            rewarded_at: None,
+        };
+        self.referrals().insert_one(referral, None).await?;
+        Ok(true)
+    }
+
+    /// Get the referrer ID for a given invited user.
+    pub async fn get_referrer_of(&self, invited_id: i64) -> Result<Option<i64>> {
+        let filter = doc! { "invitedId": invited_id };
+        Ok(self.referrals().find_one(filter, None).await?.map(|r| r.referrer_id))
+    }
+
+    /// Count how many users were invited by a referrer.
+    pub async fn count_referrals_by_referrer(&self, referrer_id: i64) -> Result<i64> {
+        let filter = doc! { "referrerId": referrer_id };
+        let count = self.referrals().count_documents(filter, None).await?;
+        Ok(count as i64)
+    }
+
+    /// Mark a referral as rewarded and return the referrer ID if eligible.
+    /// Returns Some(referrer_id) if reward should be granted, None otherwise.
+    pub async fn consume_referral_reward(&self, invited_id: i64) -> Result<Option<i64>> {
+        let filter = doc! { "invitedId": invited_id };
+        
+        if let Some(referral) = self.referrals().find_one(filter.clone(), None).await? {
+            // Already rewarded
+            if referral.rewarded_at.is_some() {
+                return Ok(None);
+            }
+
+            // Mark as rewarded
+            let update = doc! {
+                "$set": {
+                    "rewardedAt": mongodb::bson::DateTime::from_chrono(Utc::now())
+                }
+            };
+            self.referrals().update_one(filter, update, None).await?;
+            return Ok(Some(referral.referrer_id));
+        }
+
+        Ok(None)
     }
 }
 

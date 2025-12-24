@@ -61,15 +61,17 @@
 //! - **Semaphore** ограничивает параллельные запросы к Telegram API
 //! - **Recovery** восстанавливает "зависшие" напоминания при старте
 
+pub mod channels;
 pub mod subscription;
 
 // Re-export for convenient use
+pub use channels::start_channel_scheduler;
 pub use subscription::start_subscription_scheduler;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use futures::stream::{self, StreamExt};
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
@@ -233,18 +235,33 @@ async fn process_due_reminders(
 /// | Temp error, retry < max | Планируем retry |
 /// | Temp error, retry >= max | Помечаем failed |
 async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result<()> {
+    use crate::bot::keyboards::reminder_snooze_keyboard;
+
     let chat_id = ChatId(reminder.chat_id);
     let rem_id = reminder.rem_id.unwrap_or(0);
 
-    // Формируем сообщение в HTML формате
+    // Получаем настройки пользователя для кнопок откладывания
+    let user = db.ensure_user(reminder.chat_id).await?;
+    
+    // Форматируем время в часовом поясе пользователя
+    let time_display = format_reminder_time(&reminder.time, &user.utc);
+
+    // Формируем сообщение в новом формате
     let message = format!(
-        "⏰ <b>Напоминание</b>\n\n{}",
-        html_escape(&reminder.text)
+        "▹ {}\n\n\
+         📅 <b>{}</b>\n\n\
+         💬 Чтобы перенести или завершить уведомление, нажми ниже:",
+        html_escape(&reminder.text),
+        time_display
     );
+
+    // Создаём клавиатуру с кнопками откладывания
+    let keyboard = reminder_snooze_keyboard(rem_id, &user.snooze_buttons);
 
     // Отправляем через Telegram API
     match bot.send_message(chat_id, &message)
         .parse_mode(ParseMode::Html)
+        .reply_markup(keyboard)
         .await 
     {
         Ok(_sent_msg) => {
@@ -277,6 +294,110 @@ async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result
     }
 
     Ok(())
+}
+
+/// Форматирует время напоминания для отображения.
+/// Формат: "21.10 (вторник, 13:31)"
+fn format_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
+    use chrono::FixedOffset;
+
+    // Парсим смещение пользователя
+    let offset_secs = parse_utc_offset(utc_offset).unwrap_or(0);
+    let offset = FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap());
+    
+    // Конвертируем в локальное время пользователя
+    let local_time = time.with_timezone(&offset);
+    
+    // Названия дней недели на русском
+    let weekday = match local_time.weekday() {
+        chrono::Weekday::Mon => "понедельник",
+        chrono::Weekday::Tue => "вторник",
+        chrono::Weekday::Wed => "среда",
+        chrono::Weekday::Thu => "четверг",
+        chrono::Weekday::Fri => "пятница",
+        chrono::Weekday::Sat => "суббота",
+        chrono::Weekday::Sun => "воскресенье",
+    };
+    
+    format!(
+        "{:02}.{:02} ({}, {:02}:{:02})",
+        local_time.day(),
+        local_time.month(),
+        weekday,
+        local_time.hour(),
+        local_time.minute()
+    )
+}
+
+/// Форматирует полную дату для сообщения об откладывании.
+/// Формат: "ОКТЯБРЬ 2025г. 21.10 (вторник, 16:42)"
+pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
+    use chrono::FixedOffset;
+
+    let offset_secs = parse_utc_offset(utc_offset).unwrap_or(0);
+    let offset = FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap());
+    let local_time = time.with_timezone(&offset);
+    
+    let month_name = match local_time.month() {
+        1 => "ЯНВАРЬ",
+        2 => "ФЕВРАЛЬ",
+        3 => "МАРТ",
+        4 => "АПРЕЛЬ",
+        5 => "МАЙ",
+        6 => "ИЮНЬ",
+        7 => "ИЮЛЬ",
+        8 => "АВГУСТ",
+        9 => "СЕНТЯБРЬ",
+        10 => "ОКТЯБРЬ",
+        11 => "НОЯБРЬ",
+        12 => "ДЕКАБРЬ",
+        _ => "???",
+    };
+    
+    let weekday = match local_time.weekday() {
+        chrono::Weekday::Mon => "понедельник",
+        chrono::Weekday::Tue => "вторник",
+        chrono::Weekday::Wed => "среда",
+        chrono::Weekday::Thu => "четверг",
+        chrono::Weekday::Fri => "пятница",
+        chrono::Weekday::Sat => "суббота",
+        chrono::Weekday::Sun => "воскресенье",
+    };
+    
+    format!(
+        "{} {}г. <b>{:02}.{:02} ({}, {:02}:{:02})</b>",
+        month_name,
+        local_time.year(),
+        local_time.day(),
+        local_time.month(),
+        weekday,
+        local_time.hour(),
+        local_time.minute()
+    )
+}
+
+/// Парсит строку UTC offset в секунды.
+fn parse_utc_offset(utc_str: &str) -> Option<i32> {
+    if utc_str == "nil" || utc_str.is_empty() {
+        return Some(0);
+    }
+    
+    // Format: "+3:00" or "-5:30" or "7" or "+7"
+    let s = utc_str.trim();
+    
+    let (sign, rest) = if s.starts_with('-') {
+        (-1, &s[1..])
+    } else if s.starts_with('+') {
+        (1, &s[1..])
+    } else {
+        (1, s)
+    };
+    
+    let parts: Vec<&str> = rest.split(':').collect();
+    let hours: i32 = parts.first()?.parse().ok()?;
+    let minutes: i32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
+    
+    Some(sign * (hours * 3600 + minutes * 60))
 }
 
 /// Обрабатывает успешную отправку напоминания.
@@ -439,7 +560,7 @@ fn is_weekend(wd: chrono::Weekday) -> bool {
 /// Экранирует специальные символы для HTML.
 ///
 /// Заменяет: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`
-fn html_escape(s: &str) -> String {
+pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

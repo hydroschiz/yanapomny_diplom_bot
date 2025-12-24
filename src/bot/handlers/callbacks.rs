@@ -145,10 +145,264 @@ pub async fn handle_callback(
         _ => {}
     }
 
+    // Handle channel subscription callbacks
+    match data.as_str() {
+        "sub_delete" => {
+            return super::channels::handle_sub_delete_callback(bot, cq, dialogue, db).await;
+        }
+        "subs" => {
+            return super::channels::handle_subs_callback(bot, cq, db).await;
+        }
+        "profile" | "profile_stub" => {
+            // Redirect to profile
+            bot.answer_callback_query(cq.id).await?;
+            if let Some(msg) = cq.message {
+                if let Some(regular_msg) = msg.regular_message().cloned() {
+                    return super::profile::handle_profile_command(bot, regular_msg, db).await;
+                }
+            }
+            return Ok(());
+        }
+        "profile_list" => {
+            // Show reminders list
+            bot.answer_callback_query(cq.id).await?;
+            if let Some(msg) = cq.message {
+                if let Some(regular_msg) = msg.regular_message().cloned() {
+                    return super::reminder::handle_list_command(bot, regular_msg, db).await;
+                }
+            }
+            return Ok(());
+        }
+        "profile_setup" => {
+            // Show setup menu
+            dialogue.update(AppState::Idle).await?;
+            bot.answer_callback_query(cq.id).await?;
+            bot.send_message(chat_id, SETUP_PROMPT)
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .reply_markup(setup_keyboard())
+                .await?;
+            return Ok(());
+        }
+        "profile_subs" => {
+            // Show channel subscriptions
+            bot.answer_callback_query(cq.id).await?;
+            if let Some(msg) = cq.message {
+                if let Some(regular_msg) = msg.regular_message().cloned() {
+                    return super::channels::command_subs(bot, regular_msg, db).await;
+                }
+            }
+            return Ok(());
+        }
+        "profile_referral" => {
+            // Show referral program
+            bot.answer_callback_query(cq.id).await?;
+            return super::referral::send_referral_message(&bot, chat_id, chat_id.0, &db).await;
+        }
+        "profile_pay" => {
+            // Show payment menu
+            bot.answer_callback_query(cq.id).await?;
+            if let Some(msg) = cq.message {
+                if let Some(regular_msg) = msg.regular_message().cloned() {
+                    return super::pay::command_pay(bot, regular_msg, dialogue, db).await;
+                }
+            }
+            return Ok(());
+        }
+        "back_main" => {
+            dialogue.update(AppState::Idle).await?;
+            bot.answer_callback_query(cq.id).await?;
+            bot.send_message(chat_id, "Хорошо! Напиши мне, что нужно запомнить 📝")
+                .await?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Handle snooze callbacks: snooze:{rem_id}:{code}
+    if let Some(rest) = data.strip_prefix("snooze:") {
+        return handle_snooze_callback(bot, cq, db, rest).await;
+    }
+
+    // Handle reminder done callbacks: reminder_done:{rem_id}
+    if let Some(rest) = data.strip_prefix("reminder_done:") {
+        return handle_reminder_done_callback(bot, cq, db, rest).await;
+    }
+
+    // Handle reminder list callback
+    if data == "reminder_list" {
+        return super::reminder::handle_list_command(bot, cq.message.unwrap().regular_message().cloned().unwrap(), db).await;
+    }
+
     // Unknown callback data: send quick error.
     bot.answer_callback_query(cq.id)
         .text("Не удалось обработать выбор. Попробуйте снова.")
         .await?;
+    Ok(())
+}
+
+/// Handle snooze callback: snooze:{rem_id}:{code}
+async fn handle_snooze_callback(
+    bot: Bot,
+    cq: CallbackQuery,
+    db: Db,
+    data: &str,
+) -> HandlerResult {
+    use crate::bot::keyboards::{reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes};
+    use crate::scheduler::format_full_reminder_time;
+
+    let chat_id = match cq.message {
+        Some(ref m) => m.chat().id,
+        None => return Ok(()),
+    };
+
+    // Parse rem_id and snooze code
+    let parts: Vec<&str> = data.split(':').collect();
+    if parts.len() != 2 {
+        bot.answer_callback_query(cq.id)
+            .text("Ошибка: неверный формат")
+            .await?;
+        return Ok(());
+    }
+
+    let rem_id: i32 = match parts[0].parse() {
+        Ok(id) => id,
+        Err(_) => {
+            bot.answer_callback_query(cq.id)
+                .text("Ошибка: неверный ID напоминания")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let snooze_code = parts[1];
+    let minutes = match snooze_code_to_minutes(snooze_code) {
+        Some(m) => m,
+        None => {
+            bot.answer_callback_query(cq.id)
+                .text("Ошибка: неверный интервал")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Get reminder to get text
+    let reminder = match db.find_reminder(rem_id).await? {
+        Some(r) => r,
+        None => {
+            bot.answer_callback_query(cq.id)
+                .text("Напоминание не найдено")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Snooze the reminder
+    let new_time = db.snooze_reminder(rem_id, minutes).await?;
+    
+    // Get user for timezone
+    let user = db.ensure_user(chat_id.0).await?;
+    let time_display = format_full_reminder_time(&new_time, &user.utc);
+    let snooze_label = snooze_code_to_label(snooze_code);
+
+    // Build snoozed message
+    let message = format!(
+        "Напоминание отложено на {} ✅\n\n\
+         📅 {} ▹ {}",
+        snooze_label,
+        time_display,
+        crate::scheduler::html_escape(&reminder.text)
+    );
+
+    let keyboard = reminder_snoozed_keyboard(rem_id);
+
+    // Edit the message
+    if let Some(ref msg) = cq.message {
+        bot.edit_message_text(chat_id, msg.id(), &message)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .reply_markup(keyboard)
+            .await?;
+    }
+
+    bot.answer_callback_query(cq.id).await?;
+    Ok(())
+}
+
+/// Handle reminder done callback: reminder_done:{rem_id}
+async fn handle_reminder_done_callback(
+    bot: Bot,
+    cq: CallbackQuery,
+    db: Db,
+    data: &str,
+) -> HandlerResult {
+    use crate::scheduler::format_full_reminder_time;
+
+    let chat_id = match cq.message {
+        Some(ref m) => m.chat().id,
+        None => return Ok(()),
+    };
+
+    let rem_id: i32 = match data.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            bot.answer_callback_query(cq.id)
+                .text("Ошибка: неверный ID напоминания")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Get reminder before deleting to show in message
+    let reminder = match db.find_reminder(rem_id).await? {
+        Some(r) => r,
+        None => {
+            bot.answer_callback_query(cq.id)
+                .text("Напоминание уже удалено")
+                .await?;
+            // Remove keyboard from message
+            if let Some(ref msg) = cq.message {
+                let _ = bot.edit_message_reply_markup(chat_id, msg.id()).await;
+            }
+            return Ok(());
+        }
+    };
+
+    // Get user for timezone
+    let user = db.ensure_user(chat_id.0).await?;
+    let time_display = format_full_reminder_time(&reminder.time, &user.utc);
+
+    // Check if recurring (delay field not empty)
+    let is_recurring = !reminder.delay.is_empty();
+
+    let message = if is_recurring {
+        // Recurring reminder: just acknowledge, don't delete
+        // The scheduler will update the time for the next occurrence
+        format!(
+            "Напоминание отмечено ✅\n\n\
+             📅 {} ▹ {}\n\n\
+             🔄 Это периодическое напоминание, оно продолжит работать.",
+            time_display,
+            crate::scheduler::html_escape(&reminder.text)
+        )
+    } else {
+        // One-time reminder: delete it
+        db.complete_reminder(rem_id).await?;
+        
+        // Build completed message (with strikethrough)
+        format!(
+            "Напоминание выполнено ✅ 📅 <s>{} ▹ {}</s>",
+            time_display,
+            crate::scheduler::html_escape(&reminder.text)
+        )
+    };
+
+    // Edit the message (remove keyboard)
+    if let Some(ref msg) = cq.message {
+        bot.edit_message_text(chat_id, msg.id(), &message)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+    }
+
+    bot.answer_callback_query(cq.id).await?;
     Ok(())
 }
 

@@ -349,6 +349,30 @@ impl PaymentService {
             .parse_mode(ParseMode::Html)
             .await;
 
+        // Referral reward: if this user was invited and not yet rewarded, grant +1 month to referrer
+        if let Ok(Some(referrer_id)) = self.db.consume_referral_reward(user_id).await {
+            // Extend referrer's subscription by 1 month
+            match self.db.extend_subscription(referrer_id, 1).await {
+                Ok(referrer_expiry) => {
+                    let referrer_expiry_str = referrer_expiry.format("%d.%m.%Y").to_string();
+                    let referrer_message = format!(
+                        "🎁 <b>Бонус по реферальной программе!</b>\n\n\
+                         Ваш друг оформил подписку, и вы получили <b>+1 месяц</b> бесплатно!\n\n\
+                         📅 Подписка активна до: <b>{}</b>",
+                        referrer_expiry_str
+                    );
+                    let _ = bot
+                        .send_message(ChatId(referrer_id), referrer_message)
+                        .parse_mode(ParseMode::Html)
+                        .await;
+                    info!(referrer_id = referrer_id, invited_id = user_id, "referral reward granted: +1 month");
+                }
+                Err(e) => {
+                    warn!(referrer_id = referrer_id, invited_id = user_id, error = %e, "failed to grant referral reward");
+                }
+            }
+        }
+
         info!(payment_id = %payment_id, user_id = user_id, months = months, "payment fulfilled");
 
         Ok(())

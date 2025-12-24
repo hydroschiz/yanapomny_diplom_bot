@@ -17,17 +17,27 @@ pub static OFFSETS: &[&str] = &[
 /// - Время откладывания -> `setup_snooze`
 /// - Авто откладывание -> `setup_auto`
 /// - Время суток (UTC) -> `setup_utc`
+/// - Профиль -> `profile`
 pub fn setup_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![Btn::callback("Время откладывания", "setup_snooze")],
         vec![Btn::callback("Авто откладывание", "setup_auto")],
         vec![Btn::callback("Время суток (UTC)", "setup_utc")],
+        vec![Btn::callback("👤 Профиль", "profile")],
     ])
 }
 
 /// Клавиатура кнопки "Назад" для возврата в меню настроек.
 pub fn back_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![Btn::callback("⬅ Назад", "setup_menu")]])
+}
+
+/// Навигационная клавиатура только с кнопкой "Профиль".
+/// Для разделов, откуда "Назад" ведёт в профиль.
+pub fn profile_back_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        Btn::callback("👤 Профиль", "profile"),
+    ]])
 }
 
 /// Клавиатура выбора UTC смещения.

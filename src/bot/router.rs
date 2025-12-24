@@ -46,6 +46,12 @@ pub fn schema() -> UpdateHandler<anyhow::Error> {
                 .filter(filters::private_chat_msg)
                 .endpoint(handlers::reminder::handle_deletion_input),
         )
+        // Handle channel subscription deletion state
+        .branch(
+            dptree::case![AppState::AwaitingSubDeleteNum]
+                .filter(filters::private_chat_msg)
+                .endpoint(handlers::channels::handle_sub_delete_num),
+        )
         // Handle idle state - any text treated as reminder (lowest priority)
         .branch(
             dptree::case![AppState::Idle]

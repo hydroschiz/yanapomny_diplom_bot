@@ -60,6 +60,9 @@ pub async fn run() -> anyhow::Result<()> {
     // Создаёт Telegram бота из TELOXIDE_TOKEN
     let bot = Bot::from_env();
 
+    // Устанавливаем команды меню бота
+    set_bot_commands(&bot).await;
+
     // === 2. Подключение к MongoDB ===
     info!("Connecting to MongoDB...");
     let db = Db::connect(&config.mongo_uri, None).await?;
@@ -105,6 +108,11 @@ pub async fn run() -> anyhow::Result<()> {
     info!("Starting subscription scheduler...");
     scheduler::start_subscription_scheduler(bot.clone(), db.clone());
 
+    // === 6.2 Планировщик проверки каналов Twitch/YouTube ===
+    // Каждые 5 минут проверяет подписанные каналы на новые стримы/видео
+    info!("Starting channel scheduler...");
+    scheduler::start_channel_scheduler(bot.clone(), db.clone());
+
     // === 7. Telegram Dispatcher ===
     info!("Starting Telegram bot dispatcher...");
 
@@ -121,4 +129,28 @@ pub async fn run() -> anyhow::Result<()> {
         .await;
 
     Ok(())
+}
+
+/// Устанавливает список команд в меню бота.
+async fn set_bot_commands(bot: &Bot) {
+    use teloxide::types::BotCommand;
+
+    let commands = vec![
+        BotCommand::new("start", "Начать"),
+        BotCommand::new("help", "Дополнительная информация"),
+        BotCommand::new("utc", "Настройка часового пояса"),
+        BotCommand::new("profile", "Профиль и подписка"),
+        BotCommand::new("pay", "Оплата"),
+        BotCommand::new("setup", "Настройки"),
+        BotCommand::new("list", "Список активных напоминаний"),
+        BotCommand::new("yan", "ИИ-помощник Yan"),
+        BotCommand::new("subs", "Уведомления о новых видео"),
+        BotCommand::new("ref", "Реферальная ссылка"),
+    ];
+
+    if let Err(e) = bot.set_my_commands(commands).await {
+        tracing::warn!(error = %e, "Failed to set bot commands");
+    } else {
+        info!("Bot commands menu updated");
+    }
 }
