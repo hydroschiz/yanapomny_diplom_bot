@@ -4,14 +4,16 @@ use chrono::{offset::Offset, TimeZone};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{ChatKind, ParseMode};
 
 use crate::api::db::Db;
+use crate::config::Config;
 use crate::bot::{
     keyboards::{common::OFFSETS, utc_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
+use crate::utils::timezone::user_has_timezone;
 
 static OFFSET_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -48,13 +50,130 @@ static CITY_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 
-    dptree::entry().branch(
-        Update::filter_message()
-            .filter(crate::bot::filters::private_chat_msg)
-            .branch(dptree::case![AppState::AwaitingUtc].endpoint(handle_utc_input))
-            .branch(dptree::case![AppState::AwaitingSnoozeButtons].endpoint(handle_snooze_input))
-            .branch(dptree::case![AppState::AwaitingAutoSnooze].endpoint(handle_auto_snooze_input)),
-    )
+    dptree::entry()
+        // State handlers (work in both Private and Group chats)
+        .branch(
+            Update::filter_message()
+                .branch(dptree::case![AppState::AwaitingUtc].endpoint(handle_utc_input))
+                .branch(dptree::case![AppState::AwaitingSnoozeButtons].endpoint(handle_snooze_input))
+                .branch(dptree::case![AppState::AwaitingAutoSnooze].endpoint(handle_auto_snooze_input))
+        )
+        // Group chat idle text (starts with @botname)
+        .branch(
+            Update::filter_message()
+                .filter(crate::bot::filters::group_chat_msg)
+                .endpoint(handle_group_text)
+        )
+}
+
+pub async fn handle_group_text(
+    bot: Bot,
+    msg: Message,
+    dialogue: AppDialogue,
+    db: Db,
+    config: Config,
+) -> HandlerResult {
+    let text = match msg.text() {
+        Some(t) => t.trim(),
+        None => return Ok(()),
+    };
+
+    let clean_text = match extract_group_mention_text(text, &config.bot_username) {
+        Some(text) => text,
+        None => return Ok(()),
+    };
+
+    let group_id = msg.chat.id.0;
+
+    if let ChatKind::Public(chat) = &msg.chat.kind {
+        let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
+        let owner_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(msg.chat.id.0);
+        let _ = db.ensure_group_record(group_id, title, owner_id).await?;
+    }
+
+    let group_user = db.ensure_user(group_id).await?;
+    if !user_has_timezone(&group_user) {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "Сначала установите часовой пояс для этого чата командой /start@{} или /utc",
+                config.bot_username
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Check subscriptions
+    // 1. Check group subscription
+    let mut is_allowed = db.is_subscription_active(group_id).await?;
+    
+    // 2. Check sender subscription
+    if !is_allowed {
+        if let Some(user) = &msg.from {
+            if db.is_subscription_active(user.id.0 as i64).await? {
+                is_allowed = true;
+            }
+        }
+    }
+
+    // 3. Check owner subscription
+    if !is_allowed {
+        if let Some(record) = db.find_record(group_id).await? {
+            if let Some(owner_id) = record.owner_id {
+                 if db.is_subscription_active(owner_id).await? {
+                    is_allowed = true;
+                 }
+            }
+        }
+    }
+
+    if !is_allowed {
+         bot.send_message(msg.chat.id, "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.").await?;
+         return Ok(());
+    }
+
+    super::reminder::start_reminder_creation_flow(bot, msg.chat.id, clean_text, dialogue).await
+}
+
+fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<String> {
+    let username = bot_username.trim_start_matches('@');
+
+    for (at_index, _) in text.match_indices('@') {
+        let after_at = &text[at_index + 1..];
+        if after_at.len() < username.len() {
+            continue;
+        }
+
+        let candidate = &after_at[..username.len()];
+        if !candidate.eq_ignore_ascii_case(username) {
+            continue;
+        }
+
+        let boundary = after_at[username.len()..].chars().next();
+        if matches!(boundary, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_') {
+            continue;
+        }
+
+        let mut suffix = &after_at[username.len()..];
+        suffix = suffix.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | ';' | '-' | '!' | '?'));
+
+        let prefix = text[..at_index].trim_end();
+        let cleaned = if prefix.is_empty() {
+            suffix.trim().to_string()
+        } else if suffix.trim().is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{} {}", prefix, suffix.trim())
+        };
+
+        let cleaned = cleaned.trim().to_string();
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+
+    None
 }
 
 pub async fn handle_utc_input(
@@ -91,7 +210,7 @@ pub async fn handle_utc_input(
         let tz_offset = timezone_offset_string(&tz_name).unwrap_or("+00:00".to_string());
 
         db.ensure_user(chat_id.0).await?;
-        db.update_timezone(chat_id.0, &tz_name).await?;
+        db.update_timezone(chat_id.0, &tz_name, &tz_offset).await?;
         db.update_user_state(chat_id.0, "waiting_for_message")
             .await?;
         dialogue.update(AppState::Idle).await?;

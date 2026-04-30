@@ -1,0 +1,113 @@
+services:
+  # === Database ===
+  mongodb:
+    image: mongo:4.4
+    container_name: yanapomnyu-mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS}
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - bot_network
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # === Redis Cache ===
+  redis:
+    image: redis:7-alpine
+    container_name: yanapomnyu-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    networks:
+      - bot_network
+    command: redis-server --appendonly yes
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # === LLM Service (Go) ===
+  llm_api:
+    build:
+      context: ./llm_api
+      dockerfile: Dockerfile
+    container_name: yanapomnyu-llm
+    restart: always
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      OPENAI_BASE_URL: "https://openrouter.ai/api/v1/"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: "google/gemma-3-27b-it:free"
+    networks:
+      - bot_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # === Telegram Bot (Rust) ===
+  bot:
+    build:
+      context: ./yanapomnyu_bot
+      dockerfile: Dockerfile
+    container_name: yanapomnyu-bot
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      llm_api:
+        condition: service_started
+    environment:
+      TELOXIDE_TOKEN: ${BOT_TOKEN}
+      # MongoDB connection - можно задать MONGO_URI напрямую или использовать отдельные переменные
+      # Если используете MONGO_USER/MONGO_PASS, пароль будет автоматически URL-encoded
+      MONGO_USER: ${MONGO_USER}
+      MONGO_PASS: ${MONGO_PASS}
+      MONGO_HOST: mongodb
+      MONGO_PORT: "27017"
+      MONGO_DB: tgBot
+      MONGO_AUTH_SOURCE: admin
+      # Альтернатива: задать MONGO_URI напрямую (пароль должен быть URL-encoded вручную)
+      # MONGO_URI: "mongodb://user:encoded_password@mongodb:27017/tgBot?authSource=admin"
+      REDIS_URL: "redis://redis:6379/"
+      LLM_API_URL: "http://llm_api:8080"
+      # Payment settings
+      YK_SHOP_ID: ${YK_SHOP_ID:-test}
+      YK_SECRET_KEY: ${YK_SECRET_KEY:-test}
+      YK_RETURN_URL: ${YK_RETURN_URL:-https://t.me/yanapomnyu_bot}
+      # Server settings
+      IP: "0.0.0.0"
+      PORT: "3001"
+      ADMINS: ${ADMINS_ID}
+      RUST_LOG: ${RUST_LOG:-info}
+    networks:
+      - bot_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  bot_network:

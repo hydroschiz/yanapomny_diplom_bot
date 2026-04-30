@@ -21,6 +21,24 @@ services:
       - "6379:6379"
     command: redis-server --appendonly yes
 
+  # Ollama runs locally on host, not in Docker
+  # Start with: ollama serve
+  # Model: gemma3-12b:latest
+
+  llm_api:
+    build:
+      context: ../../../GoProjects/llm_api
+      dockerfile: Dockerfile
+    container_name: yanapomnyu-llm-api
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - OPENAI_BASE_URL=https://openrouter.ai/api/v1/
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=google/gemma-3-27b-it:free
+
   bot:
     image: rustlang/rust:nightly
     container_name: yanapomnyu-bot
@@ -28,6 +46,7 @@ services:
     depends_on:
       - mongodb1
       - redis
+      - llm_api
     working_dir: /app
     volumes:
       - ./:/app
@@ -36,6 +55,7 @@ services:
     environment:
       - MONGO_URI=${MONGO_URI:-mongodb://tgBotUser:tgBotPassword@mongodb1:27017/tgBot?authSource=tgBot}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/}
+      - LLM_API_URL=http://llm_api:8080
     command: bash -lc "source /usr/local/cargo/env && cargo +nightly build --release && ./target/release/yanapomnyu_bot"
     ports:
       - "3001:3001"

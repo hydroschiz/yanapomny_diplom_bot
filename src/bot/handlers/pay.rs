@@ -55,8 +55,19 @@ pub async fn command_pay(
     msg: Message,
     dialogue: AppDialogue,
     db: Db,
+    payment_svc: Arc<PaymentService>,
 ) -> HandlerResult {
     let user_id = msg.chat.id.0;
+
+    if !payment_svc.is_enabled() {
+        dialogue.update(AppState::Idle).await?;
+        bot.send_message(
+            msg.chat.id,
+            "⚠️ Платёжный контур сейчас отключён. Базовые сценарии напоминаний работают в reminder-only режиме.",
+        )
+        .await?;
+        return Ok(());
+    }
 
     // Get subscription status
     let record = db.find_record(user_id).await?;
@@ -94,6 +105,17 @@ pub async fn handle_pay_callback(
         None => return Ok(()),
     };
     let user_id = chat_id.0;
+
+    if !payment_svc.is_enabled() && data != "pay_cancel" {
+        dialogue.update(AppState::Idle).await?;
+        bot.answer_callback_query(cq.id.clone()).await?;
+        bot.send_message(
+            chat_id,
+            "⚠️ Платёжный контур сейчас отключён. Напоминания и список доступны без оплаты.",
+        )
+        .await?;
+        return Ok(());
+    }
 
     // pay_cancel - return to /start
     if data == "pay_cancel" {

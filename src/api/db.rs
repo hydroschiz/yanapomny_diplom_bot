@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use mongodb::{
     Client, Collection, Database, IndexModel,
@@ -11,6 +11,7 @@ use mongodb::{
     options::{ClientOptions, FindOneAndUpdateOptions, IndexOptions, ReturnDocument},
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const DB_NAME: &str = "tgBot";
 const USERS_COLLECTION: &str = "users";
@@ -138,8 +139,16 @@ impl Db {
     pub async fn connect(uri: impl AsRef<str>, db_name: Option<&str>) -> Result<Self> {
         let mut options = ClientOptions::parse(uri.as_ref()).await?;
         options.app_name = Some("yanapomnyu_bot".into());
+        options.server_selection_timeout = Some(Duration::from_secs(3));
+        options.connect_timeout = Some(Duration::from_secs(3));
 
         let client = Client::with_options(options)?;
+        client
+            .database("admin")
+            .run_command(doc! { "ping": 1 }, None)
+            .await
+            .context("MongoDB ping failed during startup")?;
+
         let db = client.database(db_name.unwrap_or(DB_NAME));
 
         let instance = Self { client, db };
@@ -288,9 +297,9 @@ impl Db {
         Ok(user)
     }
 
-    pub async fn update_timezone(&self, id: i64, timezone: &str) -> Result<()> {
+    pub async fn update_timezone(&self, id: i64, timezone: &str, utc: &str) -> Result<()> {
         let filter = doc! {"id": id};
-        let update = doc! {"$set": {"timezone": timezone}};
+        let update = doc! {"$set": {"timezone": timezone, "utc": utc}};
         self.users().update_one(filter, update, None).await?;
         Ok(())
     }
@@ -348,6 +357,39 @@ impl Db {
     /// Create a new subscription record with 7-day trial.
     pub async fn create_record(&self, id: i64) -> Result<UserRecord> {
         let record = UserRecord::new_trial(id);
+        self.records().insert_one(&record, None).await?;
+        Ok(record)
+    }
+
+    /// Ensure a group subscription record exists.
+    pub async fn ensure_group_record(&self, id: i64, name: String, owner_id: i64) -> Result<UserRecord> {
+        if let Some(mut record) = self.find_record(id).await? {
+            // Update metadata if needed
+            if !record.is_group || record.group_name != name || record.owner_id != Some(owner_id) {
+                let filter = doc! { "id": id };
+                let update = doc! {
+                    "$set": {
+                        "isGroup": true,
+                        "groupName": &name,
+                        "ownerId": owner_id
+                    }
+                };
+                self.records().update_one(filter, update, None).await?;
+                record.is_group = true;
+                record.group_name = name;
+                record.owner_id = Some(owner_id);
+            }
+            return Ok(record);
+        }
+        self.create_group_record(id, name, owner_id).await
+    }
+
+    /// Create a new group record.
+    pub async fn create_group_record(&self, id: i64, name: String, owner_id: i64) -> Result<UserRecord> {
+        let mut record = UserRecord::new_trial(id);
+        record.is_group = true;
+        record.group_name = name;
+        record.owner_id = Some(owner_id);
         self.records().insert_one(&record, None).await?;
         Ok(record)
     }
@@ -473,7 +515,7 @@ impl Db {
 
         let filter = doc! {
             "id": user_id,
-            "status": { "$ne": "sent" }
+            "status": { "$nin": ["sent", "failed", "7"] }
         };
         let options = FindOptions::builder()
             .sort(doc! { "time": 1 })
@@ -494,7 +536,7 @@ impl Db {
         let now = Utc::now();
         let now_bson = mongodb::bson::DateTime::from_chrono(now);
 
-        // Filter: active OR (retry AND retry_at <= now)
+        // Filter: active OR (retry AND retry_at <= now) OR legacy "1"
         let filter = doc! {
             "$or": [
                 {
@@ -504,6 +546,10 @@ impl Db {
                 {
                     "status": "retry",
                     "retryAt": { "$lte": now_bson.clone() }
+                },
+                {
+                    "status": "1",
+                    "time": { "$lte": now_bson.clone() }
                 }
             ]
         };
@@ -583,14 +629,14 @@ impl Db {
     }
 
     /// Snooze a reminder by a given number of minutes.
-    /// Calculates new time and updates the reminder status to "snoozed".
+    /// Calculates new time and updates the reminder status to "active".
     pub async fn snooze_reminder(&self, rem_id: i32, minutes: i64) -> Result<DateTime<Utc>> {
         let new_time = Utc::now() + chrono::Duration::minutes(minutes);
         let filter = doc! { "remID": rem_id };
         let update = doc! {
             "$set": {
                 "time": mongodb::bson::DateTime::from_chrono(new_time),
-                "status": "snoozed",
+                "status": "active",
                 "snoozeTime": mongodb::bson::DateTime::from_chrono(new_time),
                 "retryCount": 0,
                 "retryAt": mongodb::bson::Bson::Null
@@ -608,7 +654,7 @@ impl Db {
     }
 
     /// Recover stuck reminders (processing for too long).
-    pub async fn recover_stuck_reminders(&self, stuck_threshold_secs: i64) -> Result<i64> {
+    pub async fn recover_stuck_reminders(&self, _stuck_threshold_secs: i64) -> Result<i64> {
         // For now, just reset any "processing" reminders back to "active"
         // In production, you'd track processing_started_at
         let filter = doc! { "status": "processing" };
@@ -639,7 +685,7 @@ impl Db {
     pub async fn count_active_reminders(&self, user_id: i64) -> Result<i64> {
         let filter = doc! {
             "id": user_id,
-            "status": { "$nin": ["sent", "failed"] }
+            "status": { "$nin": ["sent", "failed", "7"] }
         };
         let count = self.reminders().count_documents(filter, None).await?;
         Ok(count as i64)
@@ -701,7 +747,7 @@ impl Db {
 
         let filter = doc! {
             "id": user_id,
-            "status": { "$nin": ["sent", "failed"] }
+            "status": { "$nin": ["sent", "failed", "7"] }
         };
         let options = FindOneOptions::builder()
             .sort(doc! { "time": 1 })  // Get the next upcoming reminder
@@ -769,7 +815,7 @@ impl Db {
         // Delete all reminders (active, retry status - not sent)
         let filter = doc! {
             "id": user_id,
-            "status": { "$ne": "sent" }
+            "status": { "$nin": ["sent", "failed", "7"] }
         };
         let result = self.reminders().delete_many(filter, None).await?;
 
@@ -808,7 +854,7 @@ impl Db {
     pub async fn count_user_reminders(&self, user_id: i64) -> Result<i64> {
         let filter = doc! {
             "id": user_id,
-            "status": { "$ne": "sent" }
+            "status": { "$nin": ["sent", "failed", "7"] }
         };
         let count = self.reminders().count_documents(filter, None).await?;
         Ok(count as i64)
@@ -1166,6 +1212,9 @@ pub struct UserRecord {
     /// 0 = no trial, 1 = new user (7 days trial), 2 = paid user, 3 = got bonus week
     #[serde(rename = "freestate", default)]
     pub free_state: Option<i32>,
+    /// ID of the user who added the bot to the group (for group chats)
+    #[serde(rename = "ownerId", default)]
+    pub owner_id: Option<i64>,
 }
 
 impl UserRecord {
@@ -1179,6 +1228,7 @@ impl UserRecord {
             next_payment_date: Utc::now() + chrono::Duration::days(7),
             active: true,
             free_state: Some(1), // New user with trial
+            owner_id: None,
         }
     }
 

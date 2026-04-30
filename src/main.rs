@@ -29,13 +29,6 @@
 //! - [`scheduler`] - Фоновый планировщик отправки напоминаний
 //! - [`utils`] - Вспомогательные утилиты
 
-mod api;
-mod app;
-mod bot;
-mod config;
-mod scheduler;
-mod utils;
-
 /// Точка входа приложения.
 ///
 /// Выполняет:
@@ -61,5 +54,5 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Запускаем основное приложение
-    app::run().await
+    yanapomnyu_bot::app::run().await
 }

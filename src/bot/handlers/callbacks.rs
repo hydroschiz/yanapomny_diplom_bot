@@ -203,7 +203,7 @@ pub async fn handle_callback(
             bot.answer_callback_query(cq.id).await?;
             if let Some(msg) = cq.message {
                 if let Some(regular_msg) = msg.regular_message().cloned() {
-                    return super::pay::command_pay(bot, regular_msg, dialogue, db).await;
+                    return super::pay::command_pay(bot, regular_msg, dialogue, db, payment_svc).await;
                 }
             }
             return Ok(());
@@ -248,7 +248,7 @@ async fn handle_snooze_callback(
     data: &str,
 ) -> HandlerResult {
     use crate::bot::keyboards::{reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes};
-    use crate::scheduler::format_full_reminder_time;
+    use crate::scheduler::format_full_reminder_time_for_user;
 
     let chat_id = match cq.message {
         Some(ref m) => m.chat().id,
@@ -301,7 +301,7 @@ async fn handle_snooze_callback(
     
     // Get user for timezone
     let user = db.ensure_user(chat_id.0).await?;
-    let time_display = format_full_reminder_time(&new_time, &user.utc);
+    let time_display = format_full_reminder_time_for_user(&new_time, &user);
     let snooze_label = snooze_code_to_label(snooze_code);
 
     // Build snoozed message
@@ -334,7 +334,7 @@ async fn handle_reminder_done_callback(
     db: Db,
     data: &str,
 ) -> HandlerResult {
-    use crate::scheduler::format_full_reminder_time;
+    use crate::scheduler::format_full_reminder_time_for_user;
 
     let chat_id = match cq.message {
         Some(ref m) => m.chat().id,
@@ -368,7 +368,7 @@ async fn handle_reminder_done_callback(
 
     // Get user for timezone
     let user = db.ensure_user(chat_id.0).await?;
-    let time_display = format_full_reminder_time(&reminder.time, &user.utc);
+    let time_display = format_full_reminder_time_for_user(&reminder.time, &user);
 
     // Check if recurring (delay field not empty)
     let is_recurring = !reminder.delay.is_empty();

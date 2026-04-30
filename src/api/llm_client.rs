@@ -13,15 +13,25 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    fn timeout_from_env() -> std::time::Duration {
+        let secs = std::env::var("LLM_API_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60);
+
+        std::time::Duration::from_secs(secs.max(1))
+    }
+
     /// Create a new LLM client from environment variables.
     /// 
     /// Uses `LLM_API_URL` env var, defaults to `http://localhost:8080`.
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("LLM_API_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let timeout = Self::timeout_from_env();
         
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
             .build()
             .context("Failed to build HTTP client")?;
         
@@ -30,8 +40,9 @@ impl LlmClient {
 
     /// Create a new LLM client with a specific base URL.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
+        let timeout = Self::timeout_from_env();
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
             .build()
             .context("Failed to build HTTP client")?;
         

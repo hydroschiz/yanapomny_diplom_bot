@@ -1,2 +1,1 @@
-// Здесь можно размещать вспомогательные утилиты проекта.
-// Пример: pub mod time; pub mod validation;
+pub mod timezone;

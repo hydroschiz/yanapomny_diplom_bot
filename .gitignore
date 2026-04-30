@@ -1,0 +1,44 @@
+/target
+/target_user
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Local infrastructure data (Mongo/Redis volumes, logs, keys)
+/data
+/data_production
+
+# Legacy Go bot (reference only, not part of the Rust project)
+/legacy_go
+
+# Test artifacts (intermediate test results, evidence, logs, runtime data)
+/test_artifacts
+
+# RC (Release Candidate) artifacts — intermediate QA/release data
+/rc_artifacts
+/rc_artifacts.zip
+
+# Archive/zip files — not source code, can be rebuilt or downloaded
+project.zip
+tests.zip
+yookassa-sdk-rs-master.zip
+
+# SSL certificates & private keys (security/privacy)
+*.key
+*.crt
+*.pem
+
+# Codex AI config (local tool config, not project code)
+.codex
+
+# OS / IDE artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml

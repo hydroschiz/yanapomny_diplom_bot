@@ -47,9 +47,9 @@ pub fn get_tariff(months: i32) -> Option<&'static Tariff> {
 
 /// Payment service handling YooKassa integration.
 pub struct PaymentService {
-    pub yk_api: PaymentsApi,
+    pub yk_api: Option<PaymentsApi>,
     pub db: Db,
-    pub cache: PendingCache,
+    pub cache: Option<PendingCache>,
 }
 
 /// Result of payment initialization.
@@ -59,6 +59,26 @@ pub struct InitializedPayment {
 }
 
 impl PaymentService {
+    pub fn disabled(db: Db) -> Self {
+        Self {
+            yk_api: None,
+            db,
+            cache: None,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.yk_api.is_some() && self.cache.is_some()
+    }
+
+    fn require_yk_api(&self) -> anyhow::Result<&PaymentsApi> {
+        self.yk_api.as_ref().context("payment service is disabled")
+    }
+
+    fn require_cache(&self) -> anyhow::Result<&PendingCache> {
+        self.cache.as_ref().context("payment service is disabled")
+    }
+
     /// Create service from environment variables.
     pub fn from_env(db: Db) -> anyhow::Result<Self> {
         let shop_id = std::env::var("YK_SHOP_ID").context("env YK_SHOP_ID is required")?;
@@ -68,7 +88,11 @@ impl PaymentService {
         let yk_api = yk.payments();
         let cache = PendingCache::from_env()?;
 
-        Ok(Self { yk_api, db, cache })
+        Ok(Self {
+            yk_api: Some(yk_api),
+            db,
+            cache: Some(cache),
+        })
     }
 
     /// Create a new YooKassa payment.
@@ -143,7 +167,7 @@ impl PaymentService {
         request.receipt = Some(serde_json::to_value(&receipt)?);
 
         let payment = self
-            .yk_api
+            .require_yk_api()?
             .create_with_idempotency_key(request, idempotence_key)
             .await?;
 
@@ -173,7 +197,7 @@ impl PaymentService {
             currency: "RUB".to_string(),
             months: Some(months),
         };
-        self.cache.put(&pending).await?;
+        self.require_cache()?.put(&pending).await?;
 
         Ok(InitializedPayment {
             id: payment.id,
@@ -188,17 +212,19 @@ impl PaymentService {
         months: i32,
     ) -> anyhow::Result<InitializedPayment> {
         // Check for existing unpaid payment in cache
-        if let Some(p) = self.cache.get_by_user(user_id).await? {
+        let cache = self.require_cache()?;
+
+        if let Some(p) = cache.get_by_user(user_id).await? {
             if p.months == Some(months) {
                 // Refresh TTL and return existing
-                let _ = self.cache.refresh_user_ttl(user_id).await;
+                let _ = cache.refresh_user_ttl(user_id).await;
                 return Ok(InitializedPayment {
                     id: p.payment_id,
                     confirmation_url: p.confirmation_url,
                 });
             }
             // Different tariff - clear old and create new
-            let _ = self.cache.delete_by_payment(&p.payment_id).await;
+            let _ = cache.delete_by_payment(&p.payment_id).await;
         }
 
         self.init_payment(user_id, months).await
@@ -248,32 +274,34 @@ impl PaymentService {
             .unwrap_or("")
             .to_string();
 
+        let cache = self.require_cache()?;
+
         match event {
             WebhookEvent::PaymentSucceeded => {
                 if let Some(uid) = user_id {
                     // Deduplicate notifications
-                    if self.cache.notify_once(&payment.id, "succeeded").await.unwrap_or(true) {
+                    if cache.notify_once(&payment.id, "succeeded").await.unwrap_or(true) {
                         self.fulfill_payment(bot, &payment.id, uid, months.unwrap_or(3)).await?;
                     }
                 } else {
                     warn!(payment_id = %payment.id, "user_id not found in metadata");
                 }
                 // Clear cache
-                let _ = self.cache.delete_by_payment(&payment.id).await;
+                let _ = cache.delete_by_payment(&payment.id).await;
             }
             WebhookEvent::PaymentCanceled => {
                 if let Some(uid) = user_id {
-                    if self.cache.notify_once(&payment.id, "canceled").await.unwrap_or(true) {
+                    if cache.notify_once(&payment.id, "canceled").await.unwrap_or(true) {
                         let _ = bot
                             .send_message(ChatId(uid), "❌ Оплата отменена.")
                             .await;
                     }
                 }
-                let _ = self.cache.delete_by_payment(&payment.id).await;
+                let _ = cache.delete_by_payment(&payment.id).await;
             }
             WebhookEvent::PaymentWaitingForCapture => {
                 if let Some(uid) = user_id {
-                    if self.cache.notify_once(&payment.id, "waiting").await.unwrap_or(true) {
+                    if cache.notify_once(&payment.id, "waiting").await.unwrap_or(true) {
                         let _ = bot
                             .send_message(ChatId(uid), "⏳ Платёж ожидает подтверждения...")
                             .await;
@@ -294,14 +322,16 @@ impl PaymentService {
         user_id: i64,
         months: i32,
     ) -> anyhow::Result<()> {
+        let cache = self.require_cache()?;
+
         // Try to acquire lock to prevent double-fulfillment
-        if !self.cache.try_acquire_fulfill_lock(payment_id).await.unwrap_or(true) {
+        if !cache.try_acquire_fulfill_lock(payment_id).await.unwrap_or(true) {
             return Ok(());
         }
 
         // Check if already fulfilled
         if self.db.is_transaction_fulfilled(payment_id).await? {
-            let _ = self.cache.release_fulfill_lock(payment_id).await;
+            let _ = cache.release_fulfill_lock(payment_id).await;
             return Ok(());
         }
 
@@ -332,7 +362,7 @@ impl PaymentService {
         let _ = self.db.save_transaction(&tx).await;
 
         // Release lock
-        let _ = self.cache.release_fulfill_lock(payment_id).await;
+        let _ = cache.release_fulfill_lock(payment_id).await;
 
         // Notify user
         let expiry_str = new_expiry.format("%Y-%m-%d %H:%M:%S UTC").to_string();
@@ -386,7 +416,8 @@ impl PaymentService {
         payment_id: &str,
     ) -> anyhow::Result<String> {
         // Get payment status from YooKassa
-        let payment = self.yk_api.get(payment_id).await?;
+        let payment = self.require_yk_api()?.get(payment_id).await?;
+        let cache = self.require_cache()?;
 
         let status_str = serde_json::to_value(&payment.status)
             .ok()
@@ -405,11 +436,11 @@ impl PaymentService {
             "succeeded" => {
                 // Fulfill if not yet
                 self.fulfill_payment(bot, payment_id, user_id, months).await?;
-                let _ = self.cache.delete_by_payment(payment_id).await;
+                let _ = cache.delete_by_payment(payment_id).await;
                 Ok("✅ Платёж найден и подтверждён! Подписка активирована.".to_string())
             }
             "canceled" => {
-                let _ = self.cache.delete_by_payment(payment_id).await;
+                let _ = cache.delete_by_payment(payment_id).await;
                 Ok("❌ Платёж отменён. Оформите новый платёж.".to_string())
             }
             "pending" => {
@@ -423,7 +454,7 @@ impl PaymentService {
 
     /// Get pending payment for user.
     pub async fn get_pending_payment(&self, user_id: i64) -> anyhow::Result<Option<PendingPayment>> {
-        self.cache.get_by_user(user_id).await
+        self.require_cache()?.get_by_user(user_id).await
     }
 
     /// Build Axum router for webhooks.

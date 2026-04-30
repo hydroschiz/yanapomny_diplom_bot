@@ -4,6 +4,10 @@ pub fn private_chat_msg(msg: Message) -> bool {
     matches!(msg.chat.kind, ChatKind::Private(_))
 }
 
+pub fn group_chat_msg(msg: Message) -> bool {
+    matches!(msg.chat.kind, ChatKind::Public(_))
+}
+
 pub fn private_chat_cq(cq: CallbackQuery) -> bool {
     cq.message
         .as_ref()

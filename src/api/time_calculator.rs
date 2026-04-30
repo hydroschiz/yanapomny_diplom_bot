@@ -1,7 +1,9 @@
 //! Time calculation from LLM TimeSpec to actual DateTime.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveTime, Offset, Timelike, Utc, Weekday as ChronoWeekday};
+use chrono::{
+    DateTime, Datelike, Duration, FixedOffset, NaiveTime, Offset, Utc, Weekday as ChronoWeekday,
+};
 use chrono_tz::Tz;
 
 use super::llm_models::{
@@ -14,7 +16,7 @@ use super::llm_models::{
 use super::llm_models::Weekday;
 
 /// User's time preferences for morning/afternoon/evening.
-/// 
+///
 /// Supports both IANA timezone names (e.g., "Europe/Moscow") and
 /// fixed UTC offsets (e.g., "+07:00", "UTC+7").
 #[derive(Debug, Clone)]
@@ -39,7 +41,7 @@ impl Default for UserTimePrefs {
 
 impl UserTimePrefs {
     /// Parse from user database record.
-    /// 
+    ///
     /// Priority:
     /// 1. If `timezone` is set (IANA name like "Europe/Moscow"), use it
     /// 2. Otherwise, parse `utc_offset` (formats: "+07:00", "UTC+7", "+7", etc.)
@@ -55,7 +57,8 @@ impl UserTimePrefs {
             if parts.len() >= 2 {
                 let hour = parts[0].parse().unwrap_or(8);
                 let min = parts[1].parse().unwrap_or(0);
-                NaiveTime::from_hms_opt(hour, min, 0).unwrap_or_else(|| NaiveTime::from_hms_opt(8, 0, 0).unwrap())
+                NaiveTime::from_hms_opt(hour, min, 0)
+                    .unwrap_or_else(|| NaiveTime::from_hms_opt(8, 0, 0).unwrap())
             } else {
                 NaiveTime::from_hms_opt(8, 0, 0).unwrap()
             }
@@ -96,7 +99,8 @@ impl UserTimePrefs {
 
     /// Get the fixed offset for this user's timezone.
     pub fn fixed_offset(&self) -> FixedOffset {
-        FixedOffset::east_opt(self.offset_seconds).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
+        FixedOffset::east_opt(self.offset_seconds)
+            .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
     }
 
     /// Get offset in hours (for display purposes).
@@ -109,13 +113,14 @@ impl UserTimePrefs {
 /// Supports formats: "+07:00", "-05:30", "UTC+7", "+7", "7", etc.
 fn parse_utc_offset_to_seconds(s: &str) -> Option<i32> {
     let s = s.trim().to_uppercase();
-    
+
     // Remove "UTC" or "GMT" prefix
-    let s = s.strip_prefix("UTC")
+    let s = s
+        .strip_prefix("UTC")
         .or_else(|| s.strip_prefix("GMT"))
         .unwrap_or(&s)
         .trim();
-    
+
     if s.is_empty() {
         return Some(0);
     }
@@ -132,7 +137,10 @@ fn parse_utc_offset_to_seconds(s: &str) -> Option<i32> {
     // Parse hours and minutes
     let parts: Vec<&str> = rest.split(|c| c == ':' || c == '.').collect();
     let hours: i32 = parts.first()?.trim().parse().ok()?;
-    let minutes: i32 = parts.get(1).and_then(|m| m.trim().parse().ok()).unwrap_or(0);
+    let minutes: i32 = parts
+        .get(1)
+        .and_then(|m| m.trim().parse().ok())
+        .unwrap_or(0);
 
     // Validate
     if hours.abs() > 14 || minutes >= 60 {
@@ -233,11 +241,10 @@ fn calculate_relative(
                         .and_local_timezone(user_offset)
                         .single()
                         .unwrap_or(now);
-                } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(anchor, "%Y-%m-%d %H:%M") {
-                    result = dt
-                        .and_local_timezone(user_offset)
-                        .single()
-                        .unwrap_or(now);
+                } else if let Ok(dt) =
+                    chrono::NaiveDateTime::parse_from_str(anchor, "%Y-%m-%d %H:%M")
+                {
+                    result = dt.and_local_timezone(user_offset).single().unwrap_or(now);
                 }
             }
         }
@@ -367,7 +374,11 @@ fn calculate_monthly(
         }
     } else if spec.week_of_month != 0 {
         // N-th weekday of month
-        let weekday = spec.weekday.as_ref().map(|w| w.to_chrono()).unwrap_or(ChronoWeekday::Mon);
+        let weekday = spec
+            .weekday
+            .as_ref()
+            .map(|w| w.to_chrono())
+            .unwrap_or(ChronoWeekday::Mon);
         result = find_nth_weekday_of_month(now, weekday, spec.week_of_month, prefs)?;
     }
 
@@ -426,9 +437,13 @@ fn calculate_daily(
 // ============================================================================
 
 /// Apply time specification to a date.
-fn apply_time(dt: DateTime<FixedOffset>, spec: &TimeSpec, prefs: &UserTimePrefs) -> DateTime<FixedOffset> {
+fn apply_time(
+    dt: DateTime<FixedOffset>,
+    spec: &TimeSpec,
+    prefs: &UserTimePrefs,
+) -> DateTime<FixedOffset> {
     let user_offset = prefs.fixed_offset();
-    
+
     if let Some(time_str) = &spec.time {
         if let Some(time) = parse_time_hhmm(time_str) {
             return dt
@@ -478,7 +493,11 @@ fn parse_mmdd(s: &str) -> Option<(u32, u32)> {
 }
 
 /// Parse MM-DD and return DateTime in current/next year.
-fn parse_date_mmdd(s: &str, now: DateTime<FixedOffset>, prefs: &UserTimePrefs) -> Option<DateTime<FixedOffset>> {
+fn parse_date_mmdd(
+    s: &str,
+    now: DateTime<FixedOffset>,
+    prefs: &UserTimePrefs,
+) -> Option<DateTime<FixedOffset>> {
     let (month, day) = parse_mmdd(s)?;
     set_month_day(now, month, day, prefs).ok()
 }
@@ -501,16 +520,19 @@ fn parse_date_ddmmyyyy(s: &str, prefs: &UserTimePrefs) -> Option<DateTime<FixedO
 }
 
 /// Set day of month, handling overflow.
-fn set_day_of_month(dt: DateTime<FixedOffset>, day: u32, prefs: &UserTimePrefs) -> Result<DateTime<FixedOffset>> {
+fn set_day_of_month(
+    dt: DateTime<FixedOffset>,
+    day: u32,
+    prefs: &UserTimePrefs,
+) -> Result<DateTime<FixedOffset>> {
     let user_offset = prefs.fixed_offset();
     let year = dt.year();
     let month = dt.month();
     let max_day = days_in_month(year, month);
     let actual_day = day.min(max_day);
 
-    let date = chrono::NaiveDate::from_ymd_opt(year, month, actual_day)
-        .context("Invalid date")?;
-    
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, actual_day).context("Invalid date")?;
+
     Ok(date
         .and_time(dt.time())
         .and_local_timezone(user_offset)
@@ -519,15 +541,19 @@ fn set_day_of_month(dt: DateTime<FixedOffset>, day: u32, prefs: &UserTimePrefs) 
 }
 
 /// Set month and day, handling overflow.
-fn set_month_day(dt: DateTime<FixedOffset>, month: u32, day: u32, prefs: &UserTimePrefs) -> Result<DateTime<FixedOffset>> {
+fn set_month_day(
+    dt: DateTime<FixedOffset>,
+    month: u32,
+    day: u32,
+    prefs: &UserTimePrefs,
+) -> Result<DateTime<FixedOffset>> {
     let user_offset = prefs.fixed_offset();
     let year = dt.year();
     let max_day = days_in_month(year, month);
     let actual_day = day.min(max_day);
 
-    let date = chrono::NaiveDate::from_ymd_opt(year, month, actual_day)
-        .context("Invalid date")?;
-    
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, actual_day).context("Invalid date")?;
+
     Ok(date
         .and_time(dt.time())
         .and_local_timezone(user_offset)
@@ -536,7 +562,10 @@ fn set_month_day(dt: DateTime<FixedOffset>, month: u32, day: u32, prefs: &UserTi
 }
 
 /// Get last day of month.
-fn last_day_of_month(dt: DateTime<FixedOffset>, prefs: &UserTimePrefs) -> Result<DateTime<FixedOffset>> {
+fn last_day_of_month(
+    dt: DateTime<FixedOffset>,
+    prefs: &UserTimePrefs,
+) -> Result<DateTime<FixedOffset>> {
     let year = dt.year();
     let month = dt.month();
     let last_day = days_in_month(year, month);
@@ -565,7 +594,11 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 /// Add months to a DateTime.
-fn add_months(dt: DateTime<FixedOffset>, months: i32, prefs: &UserTimePrefs) -> DateTime<FixedOffset> {
+fn add_months(
+    dt: DateTime<FixedOffset>,
+    months: i32,
+    prefs: &UserTimePrefs,
+) -> DateTime<FixedOffset> {
     let user_offset = prefs.fixed_offset();
     let mut year = dt.year();
     let mut month = dt.month() as i32 + months;
@@ -583,7 +616,11 @@ fn add_months(dt: DateTime<FixedOffset>, months: i32, prefs: &UserTimePrefs) -> 
     let day = dt.day().min(max_day);
 
     chrono::NaiveDate::from_ymd_opt(year, month as u32, day)
-        .and_then(|d| d.and_time(dt.time()).and_local_timezone(user_offset).single())
+        .and_then(|d| {
+            d.and_time(dt.time())
+                .and_local_timezone(user_offset)
+                .single()
+        })
         .unwrap_or(dt)
 }
 
@@ -617,20 +654,19 @@ fn find_nth_weekday_of_month(
     let month = now.month();
 
     // Start of month
-    let first_of_month = chrono::NaiveDate::from_ymd_opt(year, month, 1)
-        .context("Invalid date")?;
+    let first_of_month = chrono::NaiveDate::from_ymd_opt(year, month, 1).context("Invalid date")?;
 
     if week_of_month == -1 {
         // Last weekday of month
         let last_day = days_in_month(year, month);
-        let last_of_month = chrono::NaiveDate::from_ymd_opt(year, month, last_day)
-            .context("Invalid date")?;
-        
+        let last_of_month =
+            chrono::NaiveDate::from_ymd_opt(year, month, last_day).context("Invalid date")?;
+
         let mut day = last_of_month;
         while day.weekday() != weekday {
             day = day.pred_opt().context("Date underflow")?;
         }
-        
+
         Ok(day
             .and_hms_opt(0, 0, 0)
             .unwrap()
@@ -640,21 +676,21 @@ fn find_nth_weekday_of_month(
     } else {
         // N-th weekday (1-based)
         let n = week_of_month.max(1) as u32;
-        
+
         // Find first occurrence of weekday in month
         let mut day = first_of_month;
         while day.weekday() != weekday {
             day = day.succ_opt().context("Date overflow")?;
         }
-        
+
         // Add (n-1) weeks
         day = day + Duration::weeks((n - 1) as i64);
-        
+
         // Check if still in same month
         if day.month() != month {
             anyhow::bail!("Week {} of month doesn't exist", n);
         }
-        
+
         Ok(day
             .and_hms_opt(0, 0, 0)
             .unwrap()
@@ -686,7 +722,7 @@ pub fn calculate_next_occurrence(
     let next = match recurrence.pattern {
         RecurrencePattern::Daily => {
             let mut next = current_local + Duration::days(interval as i64);
-            
+
             // Apply filters
             if recurrence.filters.contains(&RecurrenceFilter::Weekdays) {
                 while !is_weekday(next.weekday()) {
@@ -697,35 +733,27 @@ pub fn calculate_next_occurrence(
                     next = next + Duration::days(1);
                 }
             }
-            
+
             next
         }
-        RecurrencePattern::Weekly => {
-            current_local + Duration::weeks(interval as i64)
-        }
-        RecurrencePattern::Monthly => {
-            add_months(current_local, interval, prefs)
-        }
-        RecurrencePattern::Yearly => {
-            add_months(current_local, interval * 12, prefs)
-        }
-        RecurrencePattern::Custom => {
-            match recurrence.interval_unit.as_ref() {
-                Some(super::llm_models::IntervalUnit::Days) => {
-                    current_local + Duration::days(interval as i64)
-                }
-                Some(super::llm_models::IntervalUnit::Weeks) => {
-                    current_local + Duration::weeks(interval as i64)
-                }
-                Some(super::llm_models::IntervalUnit::Months) => {
-                    add_months(current_local, interval, prefs)
-                }
-                Some(super::llm_models::IntervalUnit::Years) => {
-                    add_months(current_local, interval * 12, prefs)
-                }
-                None => current_local + Duration::days(interval as i64),
+        RecurrencePattern::Weekly => current_local + Duration::weeks(interval as i64),
+        RecurrencePattern::Monthly => add_months(current_local, interval, prefs),
+        RecurrencePattern::Yearly => add_months(current_local, interval * 12, prefs),
+        RecurrencePattern::Custom => match recurrence.interval_unit.as_ref() {
+            Some(super::llm_models::IntervalUnit::Days) => {
+                current_local + Duration::days(interval as i64)
             }
-        }
+            Some(super::llm_models::IntervalUnit::Weeks) => {
+                current_local + Duration::weeks(interval as i64)
+            }
+            Some(super::llm_models::IntervalUnit::Months) => {
+                add_months(current_local, interval, prefs)
+            }
+            Some(super::llm_models::IntervalUnit::Years) => {
+                add_months(current_local, interval * 12, prefs)
+            }
+            None => current_local + Duration::days(interval as i64),
+        },
     };
 
     Ok(Some(next.with_timezone(&Utc)))
@@ -845,13 +873,13 @@ mod tests {
     fn test_time_conversion_with_timezone() {
         // Scenario: User in UTC+7 says "tomorrow at 9:30"
         // Expected: The time should be stored as 02:30 UTC (9:30 - 7 = 02:30)
-        
+
         use chrono::TimeZone;
-        
+
         // Create a fixed "now" for deterministic testing
         // Let's say it's 2025-12-11 03:00 UTC (10:00 in UTC+7)
         let now = Utc.with_ymd_and_hms(2025, 12, 11, 3, 0, 0).unwrap();
-        
+
         // User timezone: UTC+7
         let prefs = UserTimePrefs {
             morning: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
@@ -870,14 +898,14 @@ mod tests {
         };
 
         let result = calculate_from_time_spec(&spec, now, &prefs).unwrap();
-        
+
         // In user's timezone (UTC+7), "now" is 2025-12-11 10:00
         // Tomorrow at 9:30 in UTC+7 = 2025-12-12 09:30 (UTC+7)
         // Convert to UTC: 2025-12-12 09:30 - 7h = 2025-12-12 02:30 UTC
         assert_eq!(result.year(), 2025);
         assert_eq!(result.month(), 12);
         assert_eq!(result.day(), 12);
-        assert_eq!(result.hour(), 2);  // 09:30 - 7h = 02:30 UTC
+        assert_eq!(result.hour(), 2); // 09:30 - 7h = 02:30 UTC
         assert_eq!(result.minute(), 30);
     }
 }

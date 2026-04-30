@@ -6,7 +6,7 @@ use teloxide::types::{Message, ParseMode};
 use crate::api::db::Db;
 use crate::bot::keyboards::profile_keyboard;
 use crate::bot::router::HandlerResult;
-use crate::scheduler::format_full_reminder_time;
+use crate::scheduler::format_full_reminder_time_for_user;
 
 /// Советы от Яна для профиля.
 const TIPS: &[&str] = &[
@@ -69,7 +69,7 @@ pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerRe
     // Последнее напоминание
     let last_reminder = db.get_last_reminder(user_id).await.ok().flatten();
     let last_reminder_text = if let Some(rem) = last_reminder {
-        let time_display = format_full_reminder_time(&rem.time, &user.utc);
+        let time_display = format_full_reminder_time_for_user(&rem.time, &user);
         format!(
             "📌 Ближайшее напоминание: \"{}\" — {}\n\n",
             truncate_text(&rem.text, 40),

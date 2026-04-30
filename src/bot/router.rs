@@ -18,11 +18,11 @@ pub async fn build_deps() -> anyhow::Result<DependencyMap> {
     let storage = InMemStorage::<AppState>::new();
     let db = Db::connect(&config.mongo_uri, None).await?;
 
-    // Initialize PaymentService if YK_SHOP_ID is set
-    let payment_svc: Arc<PaymentService> = Arc::new(
-        PaymentService::from_env(db.clone())
-            .expect("Failed to initialize PaymentService. Check YK_SHOP_ID and YK_SECRET_KEY env vars.")
-    );
+    let payment_svc: Arc<PaymentService> = if config.payments_enabled {
+        Arc::new(PaymentService::from_env(db.clone())?)
+    } else {
+        Arc::new(PaymentService::disabled(db.clone()))
+    };
 
     Ok(dptree::deps![config, storage, db, payment_svc])
 }
@@ -60,7 +60,6 @@ pub fn schema() -> UpdateHandler<anyhow::Error> {
         );
 
     let callbacks = Update::filter_callback_query()
-        .filter(filters::private_chat_cq)
         .enter_dialogue::<CallbackQuery, InMemStorage<AppState>, AppState>()
         .branch(dptree::endpoint(handlers::callbacks::handle_callback));
 

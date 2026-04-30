@@ -3,11 +3,11 @@ use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 use super::text::timezone_offset_string;
 use crate::api::db::Db;
 use crate::bot::{
-    filters,
     keyboards::{setup_keyboard, utc_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
+use crate::utils::timezone::user_has_timezone;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
@@ -32,6 +32,8 @@ pub enum Command {
     Profile,
     #[command(description = "Реферальная ссылка")]
     Ref,
+    #[command(description = "Создать напоминание: /remind текст")]
+    Remind(String),
 }
 
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
@@ -40,7 +42,6 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     dptree::entry().branch(
         Update::filter_message()
             .filter_command::<Command>()
-            .filter(filters::private_chat_msg)
             .branch(dptree::case![Command::Start].endpoint(command_start))
             .branch(dptree::case![Command::Help].endpoint(command_help))
             .branch(dptree::case![Command::Yan].endpoint(command_yan))
@@ -50,8 +51,107 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
             .branch(dptree::case![Command::List].endpoint(super::reminder::handle_list_command))
             .branch(dptree::case![Command::Subs].endpoint(super::channels::command_subs))
             .branch(dptree::case![Command::Profile].endpoint(super::profile::handle_profile_command))
-            .branch(dptree::case![Command::Ref].endpoint(super::referral::command_ref)),
+            .branch(dptree::case![Command::Ref].endpoint(super::referral::command_ref))
+            .branch(dptree::case![Command::Remind(text)].endpoint(command_remind)),
     )
+}
+
+async fn command_remind(
+    bot: Bot,
+    msg: Message,
+    dialogue: AppDialogue,
+    db: Db,
+    config: crate::config::Config,
+    text: String,
+) -> HandlerResult {
+    let reminder_text = text.trim().to_string();
+    if reminder_text.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "Используйте команду так: /remind@{} через 10 минут написать в чат",
+                config.bot_username
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let chat_id = msg.chat.id;
+    let chat_key = chat_id.0;
+
+    if let teloxide::types::ChatKind::Public(chat) = &msg.chat.kind {
+        let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
+        let owner_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(chat_key);
+        let _ = db.ensure_group_record(chat_key, title, owner_id).await?;
+
+        let user = db.ensure_user(chat_key).await?;
+        if !user_has_timezone(&user) {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "Сначала настройте часовой пояс для этого чата через /start@{} или /utc@{}",
+                    config.bot_username, config.bot_username
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let mut is_allowed = db.is_subscription_active(chat_key).await?;
+        if !is_allowed {
+            if let Some(user) = &msg.from {
+                if db.is_subscription_active(user.id.0 as i64).await? {
+                    is_allowed = true;
+                }
+            }
+        }
+        if !is_allowed {
+            if let Some(record) = db.find_record(chat_key).await? {
+                if let Some(owner_id) = record.owner_id {
+                    if db.is_subscription_active(owner_id).await? {
+                        is_allowed = true;
+                    }
+                }
+            }
+        }
+
+        if !is_allowed {
+            bot.send_message(msg.chat.id, "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.")
+                .await?;
+            return Ok(());
+        }
+
+        return super::reminder::start_reminder_creation_flow(bot, chat_id, reminder_text, dialogue).await;
+    }
+
+    let user = match db.find_user(chat_key).await? {
+        Some(user) => user,
+        None => {
+            bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /start")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if !user_has_timezone(&user) {
+        bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /utc")
+            .await?;
+        return Ok(());
+    }
+
+    let record = db.ensure_record(chat_key).await?;
+    if !record.is_active() {
+        bot.send_message(
+            chat_id,
+            "⚠️ <b>Подписка не активна</b>\n\nДля создания напоминаний необходима активная подписка.\n\nИспользуйте команду /pay для оформления подписки.",
+        )
+        .parse_mode(ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    super::reminder::start_reminder_creation_flow(bot, chat_id, reminder_text, dialogue).await
 }
 
 async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
@@ -165,11 +265,11 @@ pub const AUTO_SNOOZE_PROMPT: &str = r#"Настройте время автом
 
 // Клавиатуры setup_keyboard и back_keyboard перенесены в crate::bot::keyboards::common
 
-async fn command_utc(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
+pub async fn command_utc(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     start_utc_flow(bot, msg.chat.id, dialogue, db).await
 }
 
-async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
+pub async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     dialogue.update(AppState::Idle).await?;
     db.update_user_state(msg.chat.id.0, "waiting_for_message").await?;
 
@@ -210,7 +310,7 @@ pub async fn start_utc_flow(
     Ok(())
 }
 
-async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
+pub async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     let text = r#"<b>YANAPOMNYU</b> — твой личный помощник для организации дел прямо в Telegram!
 
 Создавай напоминания, планируй задачи и получай уведомления без лишних приложений. Внутри тебя ждёт ИИ-помощник <b>Ян</b> — он мгновенно создаст напоминания, подскажет, как улучшить тайм-менеджмент, и поможет быть продуктивнее.
@@ -229,6 +329,31 @@ async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) ->
 
     let user_id = msg.chat.id.0;
     
+    // Check if it's a group chat
+    use teloxide::types::ChatKind;
+    if let ChatKind::Public(chat) = &msg.chat.kind {
+        // Create/Update group record
+        let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
+        if let Some(from) = &msg.from {
+             let _ = db.ensure_group_record(user_id, title, from.id.0 as i64).await;
+        }
+        
+        // Also ensure User struct for preferences
+        let user = db.ensure_user(user_id).await?;
+        if user.time_zone.is_empty() && (user.utc.is_empty() || user.utc.to_lowercase() == "nil") {
+             // For groups, just send message about setting UTC, don't start dialogue flow (state issues)
+             // Or we can start it if we assume one admin interacting
+             start_utc_flow(bot, msg.chat.id, dialogue, db).await?;
+             return Ok(());
+        }
+        
+        bot.send_message(msg.chat.id, text)
+            .parse_mode(ParseMode::Html)
+            .await?;
+            
+        return Ok(());
+    }
+
     // Handle referral payload: /start ref_<referrer_id>
     if let Some(msg_text) = msg.text() {
         if let Some(payload) = msg_text.split_whitespace().nth(1) {
@@ -245,6 +370,7 @@ async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) ->
         .await?;
 
     let user = db.ensure_user(user_id).await?;
+    let _ = db.ensure_record(user_id).await?;
     if user.time_zone.is_empty() && (user.utc.is_empty() || user.utc.to_lowercase() == "nil") {
         start_utc_flow(bot, msg.chat.id, dialogue, db).await?;
     }

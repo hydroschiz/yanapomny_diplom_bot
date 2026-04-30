@@ -1,0 +1,16 @@
+target
+target_*
+.git
+.env
+.env.*
+!.env.example
+data
+data_production
+legacy_go
+docs
+tests
+*.md
+*.zip
+.gitignore
+
+

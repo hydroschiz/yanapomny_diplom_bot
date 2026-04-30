@@ -13,7 +13,7 @@ use axum::Router;
 use teloxide::dispatching::UpdateHandler;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::api::db::Db;
 use crate::api::payments::PaymentService;
@@ -65,31 +65,47 @@ pub async fn run() -> anyhow::Result<()> {
 
     // === 2. Подключение к MongoDB ===
     info!("Connecting to MongoDB...");
-    let db = Db::connect(&config.mongo_uri, None).await?;
+    let db = match Db::connect(&config.mongo_uri, None).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(error = %err, "MongoDB is unavailable during startup");
+            return Err(err);
+        }
+    };
     info!("MongoDB connected");
 
     // === 3. Инициализация платёжного сервиса ===
     // PaymentService работает с YooKassa API и Redis кэшем
-    info!("Initializing PaymentService...");
-    let payment_svc = Arc::new(PaymentService::from_env(db.clone())?);
-    info!("PaymentService initialized");
+    let payment_svc = if config.payments_enabled {
+        info!("Initializing PaymentService...");
+        let service = Arc::new(PaymentService::from_env(db.clone())?);
+        info!("PaymentService initialized");
+        service
+    } else {
+        warn!("PaymentService disabled by configuration; reminder-only mode is active");
+        Arc::new(PaymentService::disabled(db.clone()))
+    };
 
     // === 4. HTTP сервер для webhooks YooKassa ===
     // Axum router обрабатывает POST /yookassa/webhook
-    let webhook_router: Router = payment_svc.clone().router(bot.clone());
+    if payment_svc.is_enabled() {
+        let webhook_router: Router = payment_svc.clone().router(bot.clone());
 
-    // Парсим адрес для bind (IP:PORT из конфигурации)
-    let addr: std::net::SocketAddr = format!("{}:{}", config.ip, config.port).parse()?;
+        // Парсим адрес для bind (IP:PORT из конфигурации)
+        let addr: std::net::SocketAddr = format!("{}:{}", config.ip, config.port).parse()?;
 
-    info!(%addr, "Starting HTTP server for YooKassa webhooks");
+        info!(%addr, "Starting HTTP server for YooKassa webhooks");
 
-    // Запускаем HTTP сервер в фоновом task
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, webhook_router).await {
-            tracing::error!(error = %e, "axum server failed");
-        }
-    });
+        // Запускаем HTTP сервер в фоновом task
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, webhook_router).await {
+                tracing::error!(error = %e, "axum server failed");
+            }
+        });
+    } else {
+        info!("Skipping YooKassa webhook server because payments are disabled");
+    }
 
     // === 5. Хранилище состояний диалогов ===
     // InMemStorage хранит AppState для каждого chat_id

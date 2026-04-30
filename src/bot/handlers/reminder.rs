@@ -1,7 +1,6 @@
 //! Reminder creation and management handlers.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use chrono_tz::Tz;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 
@@ -15,6 +14,9 @@ use crate::bot::keyboards::{
 };
 use crate::bot::router::{AppDialogue, HandlerResult};
 use crate::bot::states::{AppState, PendingReminder, PendingText};
+use crate::utils::timezone::{
+    user_datetime_string, user_has_timezone, user_local_time, user_offset_string_at,
+};
 
 /// LLM client shared across handlers.
 static LLM_CLIENT: std::sync::OnceLock<LlmClient> = std::sync::OnceLock::new();
@@ -64,14 +66,15 @@ pub async fn handle_idle_text(
     };
 
     // Check if timezone is set
-    if user.utc == "nil" && user.time_zone.is_empty() {
+    if !user_has_timezone(&user) {
         bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /utc")
             .await?;
         return Ok(());
     }
 
-    // Check if user has active subscription
-    if !db.is_subscription_active(chat_id.0).await? {
+    // Fresh user should immediately get a trial/default record after onboarding.
+    let record = db.ensure_record(chat_id.0).await?;
+    if !record.is_active() {
         let no_subscription_message = 
             "⚠️ <b>Подписка не активна</b>\n\n\
             Для создания напоминаний необходима активная подписка.\n\n\
@@ -83,11 +86,22 @@ pub async fn handle_idle_text(
         return Ok(());
     }
 
+    start_reminder_creation_flow(bot, chat_id, text.to_string(), dialogue).await
+}
+
+/// Start the flow of creating a reminder (confirmation -> LLM).
+/// Assumes subscription and user checks are already done.
+pub async fn start_reminder_creation_flow(
+    bot: Bot,
+    chat_id: ChatId,
+    text: String,
+    dialogue: AppDialogue,
+) -> HandlerResult {
     // Ask for confirmation BEFORE sending to LLM
     let confirmation_text = format!(
         "📝 <b>Создать напоминание из этого текста?</b>\n\n\
         <i>{}</i>",
-        html_escape(text)
+        html_escape(&text)
     );
 
     let keyboard = text_confirm_keyboard();
@@ -98,7 +112,7 @@ pub async fn handle_idle_text(
         .await?;
 
     // Save text in dialogue state
-    let pending = PendingText { text: text.to_string() };
+    let pending = PendingText { text };
     dialogue.update(AppState::AwaitingTextConfirmation { pending }).await?;
 
     Ok(())
@@ -163,15 +177,24 @@ pub async fn handle_text_confirm(
 
     // Check if parsing was successful
     if !llm_response.is_success() {
-        let error_msg = llm_response
+        let (error_code, error_msg) = llm_response
             .error
-            .map(|e| e.message)
-            .unwrap_or_else(|| "Неизвестная ошибка".to_string());
-        
+            .map(|e| (e.code, e.message))
+            .unwrap_or_else(|| ("unknown".to_string(), "Неизвестная ошибка".to_string()));
+
+        let response_text = if error_code == "ambiguous" {
+            format!(
+                "❓ Нужна дополнительная точность: {}\n\nУкажите дату или время более явно, и я попробую снова.",
+                error_msg
+            )
+        } else {
+            format!("❌ Не удалось распознать напоминание: {}", error_msg)
+        };
+
         bot.edit_message_text(
             chat_id,
             msg.id(),
-            format!("❌ Не удалось распознать напоминание: {}", error_msg),
+            response_text,
         ).await?;
         dialogue.update(AppState::Idle).await?;
         return Ok(());
@@ -673,8 +696,7 @@ fn user_time_prefs(user: &User) -> UserTimePrefs {
 
 /// Format reminder time in user's timezone for display.
 fn format_reminder_time(time: DateTime<Utc>, user: &User) -> String {
-    let offset_hours = get_user_offset_hours(user);
-    let local = time + chrono::Duration::hours(offset_hours as i64);
+    let local = user_local_time(user, time);
     let weekday = get_russian_weekday(local.weekday());
     
     format!(
@@ -688,72 +710,19 @@ fn format_reminder_time(time: DateTime<Utc>, user: &User) -> String {
     )
 }
 
-/// Get user's timezone offset in hours.
-fn get_user_offset_hours(user: &User) -> i32 {
-    // Try timezone name first
-    if !user.time_zone.is_empty() {
-        if let Ok(tz) = user.time_zone.parse::<Tz>() {
-            use chrono::Offset;
-            let now = Utc::now().with_timezone(&tz);
-            return (now.offset().fix().local_minus_utc() / 3600) as i32;
-        }
-    }
-
-    // Fall back to UTC offset parsing
-    if !user.utc.is_empty() && user.utc != "nil" {
-        if let Some(offset) = parse_utc_offset(&user.utc) {
-            return offset;
-        }
-    }
-
-    0 // Default to UTC
-}
-
 /// Get user's timezone as string for LLM API (e.g., "+07:00").
 fn get_user_timezone_str(user: &User) -> String {
-    let offset = get_user_offset_hours(user);
-    if offset >= 0 {
-        format!("+{:02}:00", offset)
-    } else {
-        format!("{:03}:00", offset)
-    }
+    user_offset_string_at(user, Utc::now())
 }
 
 /// Get user's current datetime string for LLM API (e.g., "2025-12-05 00:42").
 fn get_user_datetime_str(user: &User) -> String {
-    let offset = get_user_offset_hours(user);
-    let user_now = Utc::now() + chrono::Duration::hours(offset as i64);
-    user_now.format("%Y-%m-%d %H:%M").to_string()
+    user_datetime_string(user, Utc::now())
 }
 
 /// Convert UTC time to user's local time (for display purposes).
-fn convert_to_user_tz(time: DateTime<Utc>, user: &User) -> DateTime<Utc> {
-    let offset = get_user_offset_hours(user);
-    time + chrono::Duration::hours(offset as i64)
-}
-
-fn parse_utc_offset(s: &str) -> Option<i32> {
-    let s = s.to_uppercase();
-    let s = s.strip_prefix("UTC")
-        .or_else(|| s.strip_prefix("GMT"))
-        .unwrap_or(&s);
-    
-    if s.is_empty() {
-        return Some(0);
-    }
-
-    // Handle formats like "+7", "+07", "+7:00", "+07:00"
-    let s = s.split(':').next().unwrap_or(s);
-
-    let (sign, rest) = if s.starts_with('+') {
-        (1, &s[1..])
-    } else if s.starts_with('-') {
-        (-1, &s[1..])
-    } else {
-        (1, s)
-    };
-
-    rest.parse::<i32>().ok().map(|h| sign * h)
+fn convert_to_user_tz(time: DateTime<Utc>, user: &User) -> chrono::DateTime<chrono::FixedOffset> {
+    user_local_time(user, time)
 }
 
 fn get_russian_weekday(wd: chrono::Weekday) -> &'static str {

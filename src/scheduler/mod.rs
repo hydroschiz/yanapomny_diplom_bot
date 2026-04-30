@@ -78,7 +78,8 @@ use teloxide::types::ParseMode;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-use crate::api::db::{Db, Reminder};
+use crate::api::db::{Db, Reminder, User};
+use crate::utils::timezone::user_local_time;
 
 // ============================================================================
 // Конфигурация планировщика
@@ -220,6 +221,11 @@ async fn process_due_reminders(
     Ok(())
 }
 
+/// Test-oriented entry point for deterministic due reminder processing.
+pub async fn process_due_reminders_once(bot: &Bot, db: &Db) -> anyhow::Result<()> {
+    process_due_reminders(bot, db, Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS))).await
+}
+
 // ============================================================================
 // Отправка напоминания
 // ============================================================================
@@ -244,7 +250,7 @@ async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result
     let user = db.ensure_user(reminder.chat_id).await?;
     
     // Форматируем время в часовом поясе пользователя
-    let time_display = format_reminder_time(&reminder.time, &user.utc);
+    let time_display = format_reminder_time_for_user(&reminder.time, &user);
 
     // Формируем сообщение в новом формате
     let message = format!(
@@ -275,8 +281,8 @@ async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result
             // Проверяем, является ли ошибка постоянной (retry бессмысленен)
             if is_permanent_error(&error_str) {
                 warn!("Permanent failure for reminder #{}: {}", rem_id, error_str);
-                // Помечаем как sent чтобы не пытаться снова
-                db.mark_reminder_sent(rem_id).await?;
+                // Помечаем как failed чтобы не пытаться снова и сохранить статус ошибки
+                db.mark_reminder_failed(rem_id).await?;
             } 
             // Проверяем, можно ли ещё делать retry
             else if reminder.retry_count < MAX_RETRIES {
@@ -329,6 +335,29 @@ fn format_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
     )
 }
 
+pub fn format_reminder_time_for_user(time: &DateTime<Utc>, user: &User) -> String {
+    let local_time = user_local_time(user, *time);
+
+    let weekday = match local_time.weekday() {
+        chrono::Weekday::Mon => "понедельник",
+        chrono::Weekday::Tue => "вторник",
+        chrono::Weekday::Wed => "среда",
+        chrono::Weekday::Thu => "четверг",
+        chrono::Weekday::Fri => "пятница",
+        chrono::Weekday::Sat => "суббота",
+        chrono::Weekday::Sun => "воскресенье",
+    };
+
+    format!(
+        "{:02}.{:02} ({}, {:02}:{:02})",
+        local_time.day(),
+        local_time.month(),
+        weekday,
+        local_time.hour(),
+        local_time.minute()
+    )
+}
+
 /// Форматирует полную дату для сообщения об откладывании.
 /// Формат: "ОКТЯБРЬ 2025г. 21.10 (вторник, 16:42)"
 pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
@@ -364,6 +393,47 @@ pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> Stri
         chrono::Weekday::Sun => "воскресенье",
     };
     
+    format!(
+        "{} {}г. <b>{:02}.{:02} ({}, {:02}:{:02})</b>",
+        month_name,
+        local_time.year(),
+        local_time.day(),
+        local_time.month(),
+        weekday,
+        local_time.hour(),
+        local_time.minute()
+    )
+}
+
+pub fn format_full_reminder_time_for_user(time: &DateTime<Utc>, user: &User) -> String {
+    let local_time = user_local_time(user, *time);
+
+    let month_name = match local_time.month() {
+        1 => "ЯНВАРЬ",
+        2 => "ФЕВРАЛЬ",
+        3 => "МАРТ",
+        4 => "АПРЕЛЬ",
+        5 => "МАЙ",
+        6 => "ИЮНЬ",
+        7 => "ИЮЛЬ",
+        8 => "АВГУСТ",
+        9 => "СЕНТЯБРЬ",
+        10 => "ОКТЯБРЬ",
+        11 => "НОЯБРЬ",
+        12 => "ДЕКАБРЬ",
+        _ => "???",
+    };
+
+    let weekday = match local_time.weekday() {
+        chrono::Weekday::Mon => "понедельник",
+        chrono::Weekday::Tue => "вторник",
+        chrono::Weekday::Wed => "среда",
+        chrono::Weekday::Thu => "четверг",
+        chrono::Weekday::Fri => "пятница",
+        chrono::Weekday::Sat => "суббота",
+        chrono::Weekday::Sun => "воскресенье",
+    };
+
     format!(
         "{} {}г. <b>{:02}.{:02} ({}, {:02}:{:02})</b>",
         month_name,
