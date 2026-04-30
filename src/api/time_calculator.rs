@@ -777,6 +777,7 @@ fn is_weekend(wd: ChronoWeekday) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     fn utc_prefs() -> UserTimePrefs {
         UserTimePrefs::default()

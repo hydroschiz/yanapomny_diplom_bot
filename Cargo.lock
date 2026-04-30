@@ -3666,6 +3666,7 @@ name = "yanapomnyu_bot"
 version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "chrono-tz",
