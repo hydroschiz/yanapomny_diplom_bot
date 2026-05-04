@@ -1,6 +1,6 @@
 //! Клавиатуры для создания и управления напоминаниями.
 
-use teloxide::types::{InlineKeyboardButton as Btn, InlineKeyboardMarkup};
+use crate::transport::traits::{TransportButton, TransportKeyboard};
 
 /// Конвертирует код снуза в читаемый текст для кнопки.
 pub fn snooze_code_to_label(code: &str) -> &'static str {
@@ -49,22 +49,22 @@ pub fn snooze_code_to_minutes(code: &str) -> Option<i64> {
 /// Callback data:
 /// - `snooze:{rem_id}:{code}` - отложить на указанный интервал
 /// - `reminder_done:{rem_id}` - пометить как выполненное
-pub fn reminder_snooze_keyboard(rem_id: i32, snooze_buttons: &[String]) -> InlineKeyboardMarkup {
-    let mut buttons: Vec<Btn> = snooze_buttons
+pub fn reminder_snooze_keyboard(rem_id: i32, snooze_buttons: &[String]) -> TransportKeyboard {
+    let mut buttons: Vec<TransportButton> = snooze_buttons
         .iter()
         .map(|code| {
             let label = snooze_code_to_label(code);
             let callback = format!("snooze:{}:{}", rem_id, code);
-            Btn::callback(label, callback)
+            TransportButton::callback(label, callback)
         })
         .collect();
 
     // Добавляем кнопку "Готово"
-    let done_btn = Btn::callback("✅ Готово", format!("reminder_done:{}", rem_id));
+    let done_btn = TransportButton::callback("✅ Готово", format!("reminder_done:{}", rem_id));
 
     // Разбиваем на ряды по 3-4 кнопки
-    let mut rows: Vec<Vec<Btn>> = Vec::new();
-    
+    let mut rows: Vec<Vec<TransportButton>> = Vec::new();
+
     // Кнопки снуза в один ряд (максимум 3)
     if buttons.len() <= 3 {
         rows.push(buttons);
@@ -74,11 +74,11 @@ pub fn reminder_snooze_keyboard(rem_id: i32, snooze_buttons: &[String]) -> Inlin
             rows.push(buttons);
         }
     }
-    
+
     // Кнопка "Готово" в отдельный ряд
     rows.push(vec![done_btn]);
 
-    InlineKeyboardMarkup::new(rows)
+    TransportKeyboard::new(rows)
 }
 
 /// Клавиатура после откладывания напоминания.
@@ -86,10 +86,10 @@ pub fn reminder_snooze_keyboard(rem_id: i32, snooze_buttons: &[String]) -> Inlin
 /// Callback data:
 /// - `reminder_list` - показать список напоминаний
 /// - `reminder_done:{rem_id}` - пометить как выполненное
-pub fn reminder_snoozed_keyboard(rem_id: i32) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        Btn::callback("📋 Список напоминаний", "reminder_list"),
-        Btn::callback("✅ Готово", format!("reminder_done:{}", rem_id)),
+pub fn reminder_snoozed_keyboard(rem_id: i32) -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![
+        TransportButton::callback("📋 Список напоминаний", "reminder_list"),
+        TransportButton::callback("✅ Готово", format!("reminder_done:{}", rem_id)),
     ]])
 }
 
@@ -98,10 +98,10 @@ pub fn reminder_snoozed_keyboard(rem_id: i32) -> InlineKeyboardMarkup {
 /// Callback data:
 /// - `text_confirm` - подтвердить создание
 /// - `text_cancel` - отменить
-pub fn text_confirm_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        Btn::callback("✅ Да, создать", "text_confirm"),
-        Btn::callback("❌ Отмена", "text_cancel"),
+pub fn text_confirm_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![
+        TransportButton::callback("✅ Да, создать", "text_confirm"),
+        TransportButton::callback("❌ Отмена", "text_cancel"),
     ]])
 }
 
@@ -111,13 +111,13 @@ pub fn text_confirm_keyboard() -> InlineKeyboardMarkup {
 /// - `reminder_confirm` - создать напоминание
 /// - `reminder_edit` - изменить текст
 /// - `reminder_cancel` - отменить
-pub fn reminder_confirm_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
+pub fn reminder_confirm_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![
         vec![
-            Btn::callback("✅ Создать", "reminder_confirm"),
-            Btn::callback("✏️ Изменить", "reminder_edit"),
+            TransportButton::callback("✅ Создать", "reminder_confirm"),
+            TransportButton::callback("✏️ Изменить", "reminder_edit"),
         ],
-        vec![Btn::callback("❌ Отменить", "reminder_cancel")],
+        vec![TransportButton::callback("❌ Отменить", "reminder_cancel")],
     ])
 }
 
@@ -125,8 +125,8 @@ pub fn reminder_confirm_keyboard() -> InlineKeyboardMarkup {
 ///
 /// Callback data:
 /// - `reminder_cancel` - отменить редактирование
-pub fn reminder_edit_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![Btn::callback(
+pub fn reminder_edit_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![TransportButton::callback(
         "❌ Отменить",
         "reminder_cancel",
     )]])
@@ -136,8 +136,8 @@ pub fn reminder_edit_keyboard() -> InlineKeyboardMarkup {
 ///
 /// Callback data:
 /// - `reminder_delete_start` - начать удаление
-pub fn list_delete_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![Btn::callback(
+pub fn list_delete_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![TransportButton::callback(
         "🗑 Удалить напоминание",
         "reminder_delete_start",
     )]])
@@ -147,8 +147,8 @@ pub fn list_delete_keyboard() -> InlineKeyboardMarkup {
 ///
 /// Callback data:
 /// - `reminder_delete_back` - вернуться к списку
-pub fn delete_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![Btn::callback(
+pub fn delete_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![TransportButton::callback(
         "⬅️ Назад",
         "reminder_delete_back",
     )]])

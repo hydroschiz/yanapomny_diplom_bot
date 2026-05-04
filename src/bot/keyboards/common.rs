@@ -1,6 +1,6 @@
 //! Общие клавиатуры: настройки, навигация, выбор UTC.
 
-use teloxide::types::{InlineKeyboardButton as Btn, InlineKeyboardMarkup};
+use crate::transport::traits::{TransportButton, TransportKeyboard};
 
 /// Список доступных UTC смещений для выбора.
 pub static OFFSETS: &[&str] = &[
@@ -18,25 +18,25 @@ pub static OFFSETS: &[&str] = &[
 /// - Авто откладывание -> `setup_auto`
 /// - Время суток (UTC) -> `setup_utc`
 /// - Профиль -> `profile`
-pub fn setup_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
-        vec![Btn::callback("Время откладывания", "setup_snooze")],
-        vec![Btn::callback("Авто откладывание", "setup_auto")],
-        vec![Btn::callback("Время суток (UTC)", "setup_utc")],
-        vec![Btn::callback("👤 Профиль", "profile")],
+pub fn setup_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![
+        vec![TransportButton::callback("Время откладывания", "setup_snooze")],
+        vec![TransportButton::callback("Авто откладывание", "setup_auto")],
+        vec![TransportButton::callback("Время суток (UTC)", "setup_utc")],
+        vec![TransportButton::callback("👤 Профиль", "profile")],
     ])
 }
 
 /// Клавиатура кнопки "Назад" для возврата в меню настроек.
-pub fn back_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![Btn::callback("⬅ Назад", "setup_menu")]])
+pub fn back_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![TransportButton::callback("⬅ Назад", "setup_menu")]])
 }
 
 /// Навигационная клавиатура только с кнопкой "Профиль".
 /// Для разделов, откуда "Назад" ведёт в профиль.
-pub fn profile_back_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        Btn::callback("👤 Профиль", "profile"),
+pub fn profile_back_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![
+        TransportButton::callback("👤 Профиль", "profile"),
     ]])
 }
 
@@ -44,8 +44,8 @@ pub fn profile_back_keyboard() -> InlineKeyboardMarkup {
 ///
 /// Генерирует сетку кнопок с UTC смещениями (по 4 в ряд)
 /// и кнопку "Назад" для отмены.
-pub fn utc_keyboard() -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<Btn>> = Vec::new();
+pub fn utc_keyboard() -> TransportKeyboard {
+    let mut rows: Vec<Vec<TransportButton>> = Vec::new();
 
     // Генерируем кнопки UTC смещений (по 4 в ряд)
     for chunk in OFFSETS.chunks(4) {
@@ -53,14 +53,14 @@ pub fn utc_keyboard() -> InlineKeyboardMarkup {
             .iter()
             .map(|o| {
                 let label = format!("UTC{}", o);
-                Btn::callback(label, format!("utc_set:{}", o))
+                TransportButton::callback(label, format!("utc_set:{}", o))
             })
             .collect();
         rows.push(row);
     }
 
     // Кнопка отмены
-    rows.push(vec![Btn::callback("⬅ Назад", "utc_cancel")]);
+    rows.push(vec![TransportButton::callback("⬅ Назад", "utc_cancel")]);
 
-    InlineKeyboardMarkup::new(rows)
+    TransportKeyboard::new(rows)
 }

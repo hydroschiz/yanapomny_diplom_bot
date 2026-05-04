@@ -319,7 +319,7 @@ async fn handle_snooze_callback(
     if let Some(ref msg) = cq.message {
         bot.edit_message_text(chat_id, msg.id(), &message)
             .parse_mode(teloxide::types::ParseMode::Html)
-            .reply_markup(keyboard)
+            .reply_markup(keyboard.into())
             .await?;
     }
 

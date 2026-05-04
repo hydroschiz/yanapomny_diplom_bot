@@ -1,26 +1,26 @@
 //! Клавиатуры для подписок на каналы (Twitch/YouTube).
 
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use crate::transport::traits::{TransportButton, TransportKeyboard};
 
 /// Клавиатура для списка подписок.
 /// Кнопки: Удалить, Назад, Профиль.
-pub fn channel_subs_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
+pub fn channel_subs_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![
         vec![
-            InlineKeyboardButton::callback("🗑 Удалить", "sub_delete"),
-            InlineKeyboardButton::callback("◀️ Назад", "back_main"),
+            TransportButton::callback("🗑 Удалить", "sub_delete"),
+            TransportButton::callback("◀️ Назад", "back_main"),
         ],
         vec![
-            InlineKeyboardButton::callback("👤 Профиль", "profile"),
+            TransportButton::callback("👤 Профиль", "profile"),
         ],
     ])
 }
 
 /// Клавиатура для уведомлений о стримах/видео.
 /// Кнопки: Профиль, Подписки.
-pub fn stream_notification_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("👤 Профиль", "profile"),
-        InlineKeyboardButton::callback("📺 Подписки", "subs"),
+pub fn stream_notification_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![vec![
+        TransportButton::callback("👤 Профиль", "profile"),
+        TransportButton::callback("📺 Подписки", "subs"),
     ]])
 }

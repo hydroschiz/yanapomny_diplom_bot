@@ -1,6 +1,6 @@
 //! Клавиатуры для профиля пользователя.
 
-use teloxide::types::{InlineKeyboardButton as Btn, InlineKeyboardMarkup};
+use crate::transport::traits::{TransportButton, TransportKeyboard};
 
 /// Главная клавиатура профиля.
 ///
@@ -10,18 +10,18 @@ use teloxide::types::{InlineKeyboardButton as Btn, InlineKeyboardMarkup};
 /// - `profile_subs` - уведомления каналов
 /// - `profile_referral` - реферальная программа (TODO)
 /// - `profile_pay` - подписка
-pub fn profile_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![
+pub fn profile_keyboard() -> TransportKeyboard {
+    TransportKeyboard::new(vec![
         vec![
-            Btn::callback("📋 Список напоминаний", "profile_list"),
-            Btn::callback("⚙️ Настройки", "profile_setup"),
+            TransportButton::callback("📋 Список напоминаний", "profile_list"),
+            TransportButton::callback("⚙️ Настройки", "profile_setup"),
         ],
         vec![
-            Btn::callback("📺 Уведомления", "profile_subs"),
-            Btn::callback("👥 Рефералка", "profile_referral"),
+            TransportButton::callback("📺 Уведомления", "profile_subs"),
+            TransportButton::callback("👥 Рефералка", "profile_referral"),
         ],
         vec![
-            Btn::callback("💎 Подписка", "profile_pay"),
+            TransportButton::callback("💎 Подписка", "profile_pay"),
         ],
     ])
 }

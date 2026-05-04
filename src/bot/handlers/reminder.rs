@@ -252,7 +252,7 @@ pub async fn handle_text_confirm(
 
     bot.edit_message_text(chat_id, msg.id(), confirmation_text)
         .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
+        .reply_markup(keyboard.into())
         .await?;
 
     // Save pending reminder in dialogue state

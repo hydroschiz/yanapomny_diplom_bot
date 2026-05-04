@@ -7,7 +7,13 @@
 //! ## Подмодули
 //!
 //! - [`traits`] — Трейт `BotTransport` и абстрактная клавиатура `TransportKeyboard`
+//! - [`adapters`] — Адаптеры для конвертации в типы конкретных платформ
 //! - [`text_format`] — Утилиты форматирования текста (удаление HTML и т.д.)
+//! - [`dialogue_store`] — Хранилище состояний FSM
+//! - [`vk`] — VK API транспорт (реализация `BotTransport`)
 
+pub mod adapters;
+pub mod dialogue_store;
 pub mod text_format;
 pub mod traits;
+pub mod vk;

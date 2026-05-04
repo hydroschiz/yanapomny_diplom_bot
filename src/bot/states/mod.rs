@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 /// User text awaiting confirmation BEFORE sending to LLM.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PendingText {
     /// Original user text.
     pub text: String,
 }
 
 /// Pending reminder data after LLM parsing, before final confirmation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PendingReminder {
     /// Original user text.
     pub original_text: String,
@@ -20,7 +20,7 @@ pub struct PendingReminder {
     pub parsed_json: String,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq)]
 pub enum AppState {
     #[default]
     Idle,
