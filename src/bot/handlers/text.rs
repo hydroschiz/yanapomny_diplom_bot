@@ -3,15 +3,19 @@ use std::collections::HashMap;
 use chrono::{offset::Offset, TimeZone};
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::types::{ChatKind, ParseMode};
 
 use crate::api::db::Db;
 use crate::bot::{
     keyboards::{common::OFFSETS, utc_keyboard},
-    router::{AppDialogue, HandlerResult},
+    router::HandlerResult,
     states::AppState,
 };
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::config::Config;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
@@ -50,6 +54,7 @@ static CITY_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     ])
 });
 
+#[cfg(feature = "telegram-legacy")]
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 
@@ -61,6 +66,7 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     )
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_group_text(
     bot: Bot,
     msg: Message,
@@ -392,6 +398,7 @@ pub async fn handle_auto_snooze_input_transport<T: BotTransport>(
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_utc_input(
     bot: Bot,
     msg: Message,
@@ -452,6 +459,7 @@ pub async fn handle_utc_input(
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_snooze_input(
     bot: Bot,
     msg: Message,
@@ -496,6 +504,7 @@ pub async fn handle_snooze_input(
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_auto_snooze_input(
     bot: Bot,
     msg: Message,

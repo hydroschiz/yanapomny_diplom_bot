@@ -2,17 +2,44 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
 
 use crate::api::db::Db;
 use crate::api::payments::{get_tariff, PaymentService};
 use crate::bot::keyboards::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
-use crate::bot::router::{AppDialogue, HandlerResult};
+use crate::bot::router::HandlerResult;
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::bot::states::AppState;
+#[cfg(feature = "telegram-legacy")]
 use crate::transport::adapters::TelegramTransport;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
+
+#[async_trait]
+trait PayStateStore {
+    async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult;
+}
+
+#[async_trait]
+impl PayStateStore for DialogueStore {
+    async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult {
+        self.update(user_id, state);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "telegram-legacy")]
+#[async_trait]
+impl PayStateStore for AppDialogue {
+    async fn update_state(&self, _user_id: i64, state: AppState) -> HandlerResult {
+        self.update(state).await?;
+        Ok(())
+    }
+}
 
 /// Format subscription status message.
 pub fn format_subscription_status(is_active: bool, expiry: Option<&str>) -> String {
@@ -87,6 +114,7 @@ pub async fn command_pay_transport<T: BotTransport>(
     send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn command_pay(
     bot: Bot,
@@ -145,14 +173,14 @@ pub async fn handle_pay_callback_transport<T: BotTransport>(
         user_id,
         peer_id,
         payload,
-        Some(store),
-        None,
+        store,
         db,
         payment_svc,
     )
     .await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram callback entrypoint до переключения app/router на VK.
 pub async fn handle_pay_callback(
     bot: Bot,
@@ -178,8 +206,7 @@ pub async fn handle_pay_callback(
         user_id,
         peer_id,
         &data,
-        None,
-        Some(&dialogue),
+        &dialogue,
         db,
         payment_svc,
     )
@@ -187,19 +214,22 @@ pub async fn handle_pay_callback(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_pay_callback_core<T: BotTransport>(
+async fn handle_pay_callback_core<T, S>(
     transport: &T,
     event_id: &str,
     user_id: i64,
     peer_id: i64,
     data: &str,
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+    store: &S,
     db: Db,
     payment_svc: Arc<PaymentService>,
-) -> HandlerResult {
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: PayStateStore + Sync,
+{
     if !payment_svc.is_enabled() && data != "pay_cancel" {
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
         transport
             .answer_callback(event_id, user_id, peer_id, None)
             .await?;
@@ -213,7 +243,7 @@ async fn handle_pay_callback_core<T: BotTransport>(
     }
 
     if data == "pay_cancel" {
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
         transport
             .answer_callback(event_id, user_id, peer_id, None)
             .await?;
@@ -225,7 +255,7 @@ async fn handle_pay_callback_core<T: BotTransport>(
         transport
             .answer_callback(event_id, user_id, peer_id, None)
             .await?;
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
 
         let record = db.ensure_record(user_id).await?;
         let status = if record.is_active() {
@@ -253,13 +283,7 @@ async fn handle_pay_callback_core<T: BotTransport>(
             let keyboard = pay_provider_keyboard(months);
             send_html_with_keyboard(transport, peer_id, &text, &keyboard).await?;
 
-            update_state(
-                store,
-                dialogue,
-                user_id,
-                AppState::AwaitingPayment { months },
-            )
-            .await?;
+            update_state(store, user_id, AppState::AwaitingPayment { months }).await?;
             return Ok(());
         }
     }
@@ -284,13 +308,7 @@ async fn handle_pay_callback_core<T: BotTransport>(
                     )
                     .await?;
 
-                    update_state(
-                        store,
-                        dialogue,
-                        user_id,
-                        AppState::AwaitingPayment { months },
-                    )
-                    .await?;
+                    update_state(store, user_id, AppState::AwaitingPayment { months }).await?;
                 }
                 Err(e) => {
                     tracing::error!(%e, "failed to create payment");
@@ -324,7 +342,7 @@ async fn handle_pay_callback_core<T: BotTransport>(
                             let is_success = msg.contains('✅');
                             transport.send_text(peer_id, &msg).await?;
                             if is_success {
-                                update_state(store, dialogue, user_id, AppState::Idle).await?;
+                                update_state(store, user_id, AppState::Idle).await?;
                             }
                         }
                         Err(e) => {
@@ -360,19 +378,12 @@ async fn handle_pay_callback_core<T: BotTransport>(
     Ok(())
 }
 
-async fn update_state(
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+async fn update_state<S: PayStateStore + Sync>(
+    store: &S,
     user_id: i64,
     state: AppState,
 ) -> HandlerResult {
-    if let Some(store) = store {
-        store.update(user_id, state);
-    } else if let Some(dialogue) = dialogue {
-        dialogue.update(state).await?;
-    }
-
-    Ok(())
+    store.update_state(user_id, state).await
 }
 
 async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {

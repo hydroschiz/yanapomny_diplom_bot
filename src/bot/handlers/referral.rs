@@ -1,11 +1,14 @@
 //! Обработчики реферальной программы.
 
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::types::Message;
 
 use crate::api::db::Db;
 use crate::bot::keyboards::profile_back_keyboard;
 use crate::bot::router::HandlerResult;
+#[cfg(feature = "telegram-legacy")]
 use crate::transport::adapters::TelegramTransport;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
 
@@ -16,6 +19,7 @@ pub async fn command_ref_transport<T: BotTransport>(transport: &T, peer_id: i64)
     send_unavailable(transport, peer_id).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn command_ref(bot: Bot, msg: Message, _db: Db) -> HandlerResult {
     let transport = TelegramTransport::new(bot);

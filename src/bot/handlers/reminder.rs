@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Timelike, Utc};
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
 
 use crate::api::db::{Db, Reminder, User};
@@ -12,7 +13,9 @@ use crate::bot::keyboards::{
     delete_keyboard, list_delete_keyboard, reminder_confirm_keyboard, reminder_edit_keyboard,
     reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes, text_confirm_keyboard,
 };
-use crate::bot::router::{AppDialogue, HandlerResult};
+use crate::bot::router::HandlerResult;
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::bot::states::{AppState, PendingReminder, PendingText};
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
@@ -46,6 +49,7 @@ impl ReminderStateStore for DialogueStore {
     }
 }
 
+#[cfg(feature = "telegram-legacy")]
 #[async_trait]
 impl ReminderStateStore for AppDialogue {
     async fn get_state(&self, _user_id: i64) -> anyhow::Result<AppState> {
@@ -58,17 +62,20 @@ impl ReminderStateStore for AppDialogue {
     }
 }
 
+#[cfg(feature = "telegram-legacy")]
 #[derive(Clone)]
 struct TelegramReminderTransport {
     bot: Bot,
 }
 
+#[cfg(feature = "telegram-legacy")]
 impl TelegramReminderTransport {
     fn new(bot: Bot) -> Self {
         Self { bot }
     }
 }
 
+#[cfg(feature = "telegram-legacy")]
 #[async_trait]
 impl BotTransport for TelegramReminderTransport {
     async fn send_text(&self, peer_id: i64, text: &str) -> anyhow::Result<()> {
@@ -391,6 +398,7 @@ pub async fn handle_reminder_done_callback_transport<T: BotTransport>(
 // Telegram compatibility entrypoints
 // ============================================================================
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_idle_text(
     bot: Bot,
     msg: Message,
@@ -408,6 +416,7 @@ pub async fn handle_idle_text(
     handle_idle_text_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn start_reminder_creation_flow(
     bot: Bot,
     chat_id: ChatId,
@@ -419,6 +428,7 @@ pub async fn start_reminder_creation_flow(
     start_reminder_creation_flow_core(&transport, chat_id.0, chat_id.0, text, &dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_text_confirm(
     bot: Bot,
     q: CallbackQuery,
@@ -433,6 +443,7 @@ pub async fn handle_text_confirm(
     handle_text_confirm_core(&transport, &event_id, user_id, peer_id, &dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_text_cancel(
     bot: Bot,
     q: CallbackQuery,
@@ -446,6 +457,7 @@ pub async fn handle_text_cancel(
     handle_text_cancel_core(&transport, &event_id, user_id, peer_id, &dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_reminder_confirm(
     bot: Bot,
     q: CallbackQuery,
@@ -460,6 +472,7 @@ pub async fn handle_reminder_confirm(
     handle_reminder_confirm_core(&transport, &event_id, user_id, peer_id, &dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_reminder_edit(
     bot: Bot,
     q: CallbackQuery,
@@ -473,6 +486,7 @@ pub async fn handle_reminder_edit(
     handle_reminder_edit_core(&transport, &event_id, user_id, peer_id, &dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_reminder_edit_text(
     bot: Bot,
     msg: Message,
@@ -490,6 +504,7 @@ pub async fn handle_reminder_edit_text(
     handle_reminder_edit_text_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_reminder_cancel(
     bot: Bot,
     q: CallbackQuery,
@@ -503,11 +518,13 @@ pub async fn handle_reminder_cancel(
     handle_reminder_cancel_core(&transport, &event_id, user_id, peer_id, &dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_list_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
     let transport = TelegramReminderTransport::new(bot);
     handle_list_command_core(&transport, msg.chat.id.0, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_delete_start(
     bot: Bot,
     q: CallbackQuery,
@@ -521,6 +538,7 @@ pub async fn handle_delete_start(
     handle_delete_start_core(&transport, &event_id, user_id, peer_id, &dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_deletion_input(
     bot: Bot,
     msg: Message,
@@ -538,6 +556,7 @@ pub async fn handle_deletion_input(
     handle_deletion_input_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn handle_delete_back(
     bot: Bot,
     q: CallbackQuery,
@@ -1119,10 +1138,12 @@ where
 // Helper functions
 // ============================================================================
 
+#[cfg(feature = "telegram-legacy")]
 fn message_user_id(msg: &Message) -> Option<i64> {
     msg.from.as_ref().map(|user| user.id.0 as i64)
 }
 
+#[cfg(feature = "telegram-legacy")]
 fn callback_context(q: &CallbackQuery) -> Option<(String, i64, i64)> {
     let peer_id = q.message.as_ref()?.chat().id.0;
     let user_id = q.from.id.0 as i64;

@@ -1,17 +1,44 @@
 //! Handlers for channel subscriptions (Twitch/YouTube).
 
+use async_trait::async_trait;
 use regex::Regex;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
 use tracing::info;
 
 use crate::api::db::{ChannelSubscription, Db, Platform};
 use crate::bot::keyboards::channel_subs_keyboard;
-use crate::bot::router::{AppDialogue, HandlerResult};
+use crate::bot::router::HandlerResult;
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::bot::states::AppState;
+#[cfg(feature = "telegram-legacy")]
 use crate::transport::adapters::TelegramTransport;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
+
+#[async_trait]
+trait ChannelStateStore {
+    async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult;
+}
+
+#[async_trait]
+impl ChannelStateStore for DialogueStore {
+    async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult {
+        self.update(user_id, state);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "telegram-legacy")]
+#[async_trait]
+impl ChannelStateStore for AppDialogue {
+    async fn update_state(&self, _user_id: i64, state: AppState) -> HandlerResult {
+        self.update(state).await?;
+        Ok(())
+    }
+}
 
 // ============================================================================
 // URL Parsing
@@ -97,6 +124,7 @@ pub async fn command_subs_transport<T: BotTransport>(
     send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn command_subs(bot: Bot, msg: Message, db: Db) -> HandlerResult {
     let peer_id = msg.chat.id.0;
@@ -146,9 +174,10 @@ pub async fn handle_channel_url_transport<T: BotTransport>(
     store: &DialogueStore,
     db: Db,
 ) -> HandlerResult {
-    handle_channel_url_core(transport, peer_id, user_id, text, Some(store), None, db).await
+    handle_channel_url_core(transport, peer_id, user_id, text, store, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn handle_channel_url(
     bot: Bot,
@@ -161,7 +190,7 @@ pub async fn handle_channel_url(
     let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
-    handle_channel_url_core(&transport, peer_id, user_id, text, None, Some(&dialogue), db).await
+    handle_channel_url_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
 /// Handle text in AwaitingSubDeleteNum state through transport abstraction.
@@ -173,9 +202,10 @@ pub async fn handle_sub_delete_num_transport<T: BotTransport>(
     store: &DialogueStore,
     db: Db,
 ) -> HandlerResult {
-    handle_sub_delete_num_core(transport, peer_id, user_id, text, Some(store), None, db).await
+    handle_sub_delete_num_core(transport, peer_id, user_id, text, store, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn handle_sub_delete_num(
     bot: Bot,
@@ -188,19 +218,22 @@ pub async fn handle_sub_delete_num(
     let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
-    handle_sub_delete_num_core(&transport, peer_id, user_id, text, None, Some(&dialogue), db).await
+    handle_sub_delete_num_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_channel_url_core<T: BotTransport>(
+async fn handle_channel_url_core<T, S>(
     transport: &T,
     peer_id: i64,
     user_id: i64,
     text: &str,
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+    store: &S,
     db: Db,
-) -> HandlerResult {
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ChannelStateStore + Sync,
+{
     let text = text.trim();
     if text.is_empty() {
         transport
@@ -210,7 +243,7 @@ async fn handle_channel_url_core<T: BotTransport>(
     }
 
     if text.eq_ignore_ascii_case("назад") || text == "/cancel" {
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
         transport.send_text(peer_id, "Отменено.").await?;
         return Ok(());
     }
@@ -242,7 +275,7 @@ async fn handle_channel_url_core<T: BotTransport>(
             &format!("⚠️ Ты уже подписан на <b>{}</b>", parsed.channel_name),
         )
         .await?;
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
         return Ok(());
     }
 
@@ -280,20 +313,23 @@ async fn handle_channel_url_core<T: BotTransport>(
     )
     .await?;
 
-    update_state(store, dialogue, user_id, AppState::Idle).await?;
+    update_state(store, user_id, AppState::Idle).await?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_sub_delete_num_core<T: BotTransport>(
+async fn handle_sub_delete_num_core<T, S>(
     transport: &T,
     peer_id: i64,
     user_id: i64,
     text: &str,
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+    store: &S,
     db: Db,
-) -> HandlerResult {
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ChannelStateStore + Sync,
+{
     let text = text.trim();
     if text.is_empty() {
         transport
@@ -303,7 +339,7 @@ async fn handle_sub_delete_num_core<T: BotTransport>(
     }
 
     if text.eq_ignore_ascii_case("назад") || text == "/cancel" {
-        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        update_state(store, user_id, AppState::Idle).await?;
         send_subs_list(transport, peer_id, user_id, db).await?;
         return Ok(());
     }
@@ -331,7 +367,7 @@ async fn handle_sub_delete_num_core<T: BotTransport>(
             .await?;
     }
 
-    update_state(store, dialogue, user_id, AppState::Idle).await?;
+    update_state(store, user_id, AppState::Idle).await?;
     send_subs_list(transport, peer_id, user_id, db).await?;
 
     Ok(())
@@ -350,10 +386,10 @@ pub async fn handle_sub_delete_callback_transport<T: BotTransport>(
     store: &DialogueStore,
     db: Db,
 ) -> HandlerResult {
-    handle_sub_delete_callback_core(transport, event_id, user_id, peer_id, Some(store), None, db)
-        .await
+    handle_sub_delete_callback_core(transport, event_id, user_id, peer_id, store, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram callback entrypoint до переключения app/router на VK.
 pub async fn handle_sub_delete_callback(
     bot: Bot,
@@ -373,8 +409,7 @@ pub async fn handle_sub_delete_callback(
         &q.id.0,
         user_id,
         peer_id,
-        None,
-        Some(&dialogue),
+        &dialogue,
         db,
     )
     .await
@@ -394,6 +429,7 @@ pub async fn handle_subs_callback_transport<T: BotTransport>(
     send_subs_list(transport, peer_id, user_id, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 /// Временный Telegram callback entrypoint до переключения app/router на VK.
 pub async fn handle_subs_callback(bot: Bot, q: CallbackQuery, db: Db) -> HandlerResult {
     let peer_id = match &q.message {
@@ -407,15 +443,18 @@ pub async fn handle_subs_callback(bot: Bot, q: CallbackQuery, db: Db) -> Handler
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_sub_delete_callback_core<T: BotTransport>(
+async fn handle_sub_delete_callback_core<T, S>(
     transport: &T,
     event_id: &str,
     user_id: i64,
     peer_id: i64,
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+    store: &S,
     db: Db,
-) -> HandlerResult {
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ChannelStateStore + Sync,
+{
     transport
         .answer_callback(event_id, user_id, peer_id, None)
         .await?;
@@ -428,7 +467,7 @@ async fn handle_sub_delete_callback_core<T: BotTransport>(
         return Ok(());
     }
 
-    update_state(store, dialogue, user_id, AppState::AwaitingSubDeleteNum).await?;
+    update_state(store, user_id, AppState::AwaitingSubDeleteNum).await?;
     transport
         .send_text(
             peer_id,
@@ -452,19 +491,12 @@ async fn send_subs_list<T: BotTransport>(
     send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
 }
 
-async fn update_state(
-    store: Option<&DialogueStore>,
-    dialogue: Option<&AppDialogue>,
+async fn update_state<S: ChannelStateStore + Sync>(
+    store: &S,
     user_id: i64,
     state: AppState,
 ) -> HandlerResult {
-    if let Some(store) = store {
-        store.update(user_id, state);
-    } else if let Some(dialogue) = dialogue {
-        dialogue.update(state).await?;
-    }
-
-    Ok(())
+    store.update_state(user_id, state).await
 }
 
 async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {

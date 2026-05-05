@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::dispatching::dialogue::InMemStorage;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::dispatching::UpdateHandler;
+#[cfg(feature = "telegram-legacy")]
 use teloxide::prelude::*;
 use vk_bot_api::api::VkApi;
 use vk_bot_api::error::{VkError, VkResult};
@@ -20,6 +23,7 @@ use crate::transport::traits::{BotTransport, TransportKeyboard};
 
 use super::handlers;
 
+#[cfg(feature = "telegram-legacy")]
 pub type AppDialogue = Dialogue<AppState, InMemStorage<AppState>>;
 pub type HandlerResult = Result<(), anyhow::Error>;
 
@@ -653,6 +657,7 @@ impl<T: BotTransport> MessageHandler for AppHandler<T> {
     }
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn build_deps() -> anyhow::Result<DependencyMap> {
     let config = crate::config::Config::from_env();
     let storage = InMemStorage::<AppState>::new();
@@ -667,7 +672,8 @@ pub async fn build_deps() -> anyhow::Result<DependencyMap> {
     Ok(dptree::deps![config, storage, db, payment_svc])
 }
 
-/// Legacy Telegram schema kept until app assembly switches to VK in phase 6.
+/// Legacy Telegram schema kept behind `telegram-legacy` for local compatibility.
+#[cfg(feature = "telegram-legacy")]
 pub fn schema() -> UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 

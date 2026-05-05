@@ -1,3 +1,4 @@
+#[cfg(feature = "telegram-legacy")]
 pub mod callbacks;
 pub mod channels;
 pub mod commands;

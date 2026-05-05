@@ -11,7 +11,9 @@
 //! | `REDIS_URL` | URL подключения к Redis | redis://127.0.0.1/ |
 //! | `IP` | IP адрес для HTTP сервера | 0.0.0.0 |
 //! | `PORT` | Порт HTTP сервера | 3001 |
-//! | `BOT_USERNAME` | Username бота в Telegram | yanapomnyu_bot |
+//! | `VK_ACCESS_TOKEN` | Access token сообщества VK | обязательно |
+//! | `VK_GROUP_ID` | ID сообщества VK | обязательно |
+//! | `BOT_USERNAME` | Короткое имя бота для упоминаний | yanapomnyu_bot |
 
 use serde::Deserialize;
 use std::env;
@@ -41,7 +43,13 @@ pub struct Config {
     /// Порт HTTP сервера для YooKassa webhooks.
     pub port: u16,
 
-    /// Username бота в Telegram (без @).
+    /// VK access token сообщества.
+    pub vk_access_token: String,
+
+    /// VK group ID сообщества.
+    pub vk_group_id: i64,
+
+    /// Короткое имя бота для упоминаний в групповых сценариях.
     pub bot_username: String,
 
     /// Включён ли платёжный контур.
@@ -112,7 +120,13 @@ impl Config {
             .and_then(|s| s.parse().ok())
             .unwrap_or(3001);
 
-        // Username бота (для генерации ссылок t.me/username)
+        let vk_access_token = env::var("VK_ACCESS_TOKEN").expect("VK_ACCESS_TOKEN must be set");
+        let vk_group_id = env::var("VK_GROUP_ID")
+            .expect("VK_GROUP_ID must be set")
+            .parse::<i64>()
+            .expect("VK_GROUP_ID must be an integer");
+
+        // Короткое имя бота для упоминаний в групповых сценариях.
         let bot_username =
             env::var("BOT_USERNAME").unwrap_or_else(|_| "yanapomnyu_bot".to_string());
 
@@ -133,6 +147,8 @@ impl Config {
             redis_url,
             ip,
             port,
+            vk_access_token,
+            vk_group_id,
             bot_username,
             payments_enabled,
         }

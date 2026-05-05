@@ -1,17 +1,21 @@
+#[cfg(feature = "telegram-legacy")]
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 
 use super::text::timezone_offset_string;
 use crate::api::db::Db;
 use crate::bot::{
     keyboards::{profile_back_keyboard, setup_keyboard, utc_keyboard},
-    router::{AppDialogue, HandlerResult},
+    router::HandlerResult,
     states::AppState,
 };
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
 use crate::utils::timezone::user_has_timezone;
 
+#[cfg(feature = "telegram-legacy")]
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
 pub enum Command {
@@ -39,6 +43,7 @@ pub enum Command {
     Remind(String),
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 
@@ -59,6 +64,7 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     )
 }
 
+#[cfg(feature = "telegram-legacy")]
 async fn command_remind(
     bot: Bot,
     msg: Message,
@@ -157,6 +163,7 @@ async fn command_remind(
     super::reminder::start_reminder_creation_flow(bot, chat_id, reminder_text, dialogue).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
     let text = r#"💬 <b>Создавайте напоминания своими словами!</b>
 
@@ -195,6 +202,7 @@ async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 async fn command_yan(bot: Bot, msg: Message) -> HandlerResult {
     let text = r#"Привет! Я — <b>Ян</b>, твой персональный ИИ-помощник 🧠 Я помогу тебе управлять временем, делами и напоминаниями прямо в Telegram.
 
@@ -268,10 +276,12 @@ pub const AUTO_SNOOZE_PROMPT: &str = r#"Настройте время автом
 
 // Клавиатуры setup_keyboard и back_keyboard перенесены в crate::bot::keyboards::common
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn command_utc(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     start_utc_flow(bot, msg.chat.id, dialogue, db).await
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     dialogue.update(AppState::Idle).await?;
     db.update_user_state(msg.chat.id.0, "waiting_for_message").await?;
@@ -283,6 +293,7 @@ pub async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn start_utc_flow(
     bot: Bot,
     chat_id: ChatId,
@@ -313,6 +324,7 @@ pub async fn start_utc_flow(
     Ok(())
 }
 
+#[cfg(feature = "telegram-legacy")]
 pub async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     let text = r#"<b>YANAPOMNYU</b> — твой личный помощник для организации дел прямо в Telegram!
 

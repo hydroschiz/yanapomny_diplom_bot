@@ -303,6 +303,8 @@ impl HarnessSession {
             redis_url: "redis://127.0.0.1:6389/".to_string(),
             ip: "127.0.0.1".to_string(),
             port: HTTP_SERVER_PORT,
+            vk_access_token: "autotest_vk_token".to_string(),
+            vk_group_id: 1,
             bot_username: BOT_USERNAME.to_string(),
             payments_enabled: true,
         };
