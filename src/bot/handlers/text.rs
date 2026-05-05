@@ -7,12 +7,15 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatKind, ParseMode};
 
 use crate::api::db::Db;
-use crate::config::Config;
 use crate::bot::{
     keyboards::{common::OFFSETS, utc_keyboard},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
+use crate::config::Config;
+use crate::transport::dialogue_store::DialogueStore;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::{BotTransport, TransportKeyboard};
 use crate::utils::timezone::user_has_timezone;
 
 static OFFSET_RE: Lazy<Regex> = Lazy::new(|| {
@@ -50,20 +53,12 @@ static CITY_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
     use teloxide::dispatching::UpdateFilterExt;
 
-    dptree::entry()
-        // State handlers (work in both Private and Group chats)
-        .branch(
-            Update::filter_message()
-                .branch(dptree::case![AppState::AwaitingUtc].endpoint(handle_utc_input))
-                .branch(dptree::case![AppState::AwaitingSnoozeButtons].endpoint(handle_snooze_input))
-                .branch(dptree::case![AppState::AwaitingAutoSnooze].endpoint(handle_auto_snooze_input))
-        )
-        // Group chat idle text (starts with @botname)
-        .branch(
-            Update::filter_message()
-                .filter(crate::bot::filters::group_chat_msg)
-                .endpoint(handle_group_text)
-        )
+    dptree::entry().branch(
+        Update::filter_message()
+            .branch(dptree::case![AppState::AwaitingUtc].endpoint(handle_utc_input))
+            .branch(dptree::case![AppState::AwaitingSnoozeButtons].endpoint(handle_snooze_input))
+            .branch(dptree::case![AppState::AwaitingAutoSnooze].endpoint(handle_auto_snooze_input)),
+    )
 }
 
 pub async fn handle_group_text(
@@ -136,7 +131,7 @@ pub async fn handle_group_text(
     super::reminder::start_reminder_creation_flow(bot, msg.chat.id, clean_text, dialogue).await
 }
 
-fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<String> {
+pub fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<String> {
     let username = bot_username.trim_start_matches('@');
 
     for (at_index, _) in text.match_indices('@') {
@@ -174,6 +169,227 @@ fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<String> 
     }
 
     None
+}
+
+// ============================================================================
+// Transport-native text handlers for VK router
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_group_text_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    group_title: Option<&str>,
+    store: &DialogueStore,
+    db: Db,
+    config: Config,
+) -> HandlerResult {
+    let clean_text = match extract_group_mention_text(text.trim(), &config.bot_username) {
+        Some(text) => text,
+        None => return Ok(()),
+    };
+
+    let title = group_title
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("VK chat {}", peer_id));
+    let _ = db.ensure_group_record(peer_id, title, user_id).await?;
+
+    let group_user = db.ensure_user(peer_id).await?;
+    if !user_has_timezone(&group_user) {
+        transport
+            .send_text(
+                peer_id,
+                &format!(
+                    "Сначала установите часовой пояс для этого чата командой /start@{} или /utc",
+                    config.bot_username
+                ),
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let mut is_allowed = db.is_subscription_active(peer_id).await?;
+    if !is_allowed && db.is_subscription_active(user_id).await? {
+        is_allowed = true;
+    }
+
+    if !is_allowed {
+        if let Some(record) = db.find_record(peer_id).await? {
+            if let Some(owner_id) = record.owner_id {
+                if db.is_subscription_active(owner_id).await? {
+                    is_allowed = true;
+                }
+            }
+        }
+    }
+
+    if !is_allowed {
+        transport
+            .send_text(
+                peer_id,
+                "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    super::reminder::start_reminder_creation_flow_transport(
+        transport,
+        peer_id,
+        user_id,
+        clean_text,
+        store,
+    )
+    .await
+}
+
+pub async fn handle_utc_input_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    let text = text.trim();
+
+    if let Some(offset) = parse_offset(text) {
+        db.ensure_user(peer_id).await?;
+        db.update_utc_and_clear_timezone(peer_id, &offset).await?;
+        db.update_user_state(peer_id, "waiting_for_message").await?;
+        store.update(user_id, AppState::Idle);
+        send_html_text(
+            transport,
+            peer_id,
+            &super::commands::UTC_SUCCESS_MESSAGE.replace("+3:00", &offset),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if let Some(tz_name) = resolve_timezone(text) {
+        let tz_offset = timezone_offset_string(&tz_name).unwrap_or("+00:00".to_string());
+
+        db.ensure_user(peer_id).await?;
+        db.update_timezone(peer_id, &tz_name, &tz_offset).await?;
+        db.update_user_state(peer_id, "waiting_for_message").await?;
+        store.update(user_id, AppState::Idle);
+
+        send_html_text(
+            transport,
+            peer_id,
+            &super::commands::UTC_SUCCESS_MESSAGE.replace("+3:00", &tz_offset),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let keyboard = utc_keyboard();
+    send_html_with_keyboard(
+        transport,
+        peer_id,
+        "Не удалось определить часовой пояс. Укажите в формате UTC+3 или назовите город. Чтобы выйти, нажмите «Назад».",
+        &keyboard,
+    )
+    .await?;
+
+    Ok(())
+}
+
+pub async fn handle_snooze_input_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    let durations = parse_duration_list(text);
+    if durations.is_empty() {
+        transport.send_text(peer_id, "Не понял время. Пример: \"15 мин, 1 час\". Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.").await?;
+        return Ok(());
+    }
+
+    let mut codes = Vec::new();
+    for m in durations {
+        if let Some(code) = snooze_code(m) {
+            codes.push(code);
+        } else {
+            transport.send_text(peer_id, "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.").await?;
+            return Ok(());
+        }
+    }
+
+    db.update_snooze_buttons(peer_id, codes.clone()).await?;
+    db.update_user_state(peer_id, "waiting_for_message").await?;
+    store.update(user_id, AppState::Idle);
+
+    let human = codes
+        .iter()
+        .filter_map(|c| human_readable_snooze(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    send_html_text(
+        transport,
+        peer_id,
+        &format!("Сохранено. Кнопки откладывания: <b>{}</b>", human),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn handle_auto_snooze_input_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    let durations = parse_duration_list(text);
+    if durations.len() != 1 {
+        transport
+            .send_text(
+                peer_id,
+                "Введите одно значение, например \"15 мин\". Доступно: 5,10,15,20 мин.",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let code = match durations[0] {
+        5 => Some("5minutAutoSnooze"),
+        10 => Some("10minutAutoSnooze"),
+        15 => Some("15minutAutoSnooze"),
+        20 => Some("20minutAutoSnooze"),
+        _ => None,
+    };
+    let code = if let Some(c) = code {
+        c
+    } else {
+        transport
+            .send_text(peer_id, "Некорректное время. Доступно: 5,10,15,20 мин.")
+            .await?;
+        return Ok(());
+    };
+
+    db.update_auto_delay(peer_id, code.to_string()).await?;
+    db.update_user_state(peer_id, "waiting_for_message").await?;
+    store.update(user_id, AppState::Idle);
+
+    send_html_text(
+        transport,
+        peer_id,
+        &format!(
+            "Сохранено. Авто откладывание: <b>{}</b>",
+            human_readable_auto(code)
+        ),
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn handle_utc_input(
@@ -356,7 +572,7 @@ pub fn normalize_offset(raw: &str) -> Option<String> {
         .collect();
     let sign = if raw.trim().starts_with('-') { -1 } else { 1 };
 
-    let hours: i32 = parts.get(0)?.parse().ok()?;
+    let hours: i32 = parts.first()?.parse().ok()?;
     let minutes: i32 = if let Some(m) = parts.get(1) {
         m.parse().unwrap_or(0)
     } else {
@@ -478,4 +694,21 @@ pub fn human_readable_auto(code: &str) -> String {
         "20minutAutoSnooze" => "20 мин".to_string(),
         _ => code.to_string(),
     }
+}
+
+async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_text(peer_id, &text).await?;
+    Ok(())
+}
+
+async fn send_html_with_keyboard<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    text: &str,
+    keyboard: &TransportKeyboard,
+) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    Ok(())
 }

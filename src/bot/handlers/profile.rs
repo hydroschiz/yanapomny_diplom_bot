@@ -1,12 +1,15 @@
 //! Обработчики команды /profile и профиля пользователя.
 
 use teloxide::prelude::*;
-use teloxide::types::{Message, ParseMode};
+use teloxide::types::Message;
 
 use crate::api::db::Db;
 use crate::bot::keyboards::profile_keyboard;
 use crate::bot::router::HandlerResult;
 use crate::scheduler::format_full_reminder_time_for_user;
+use crate::transport::adapters::TelegramTransport;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::{BotTransport, TransportKeyboard};
 
 /// Советы от Яна для профиля.
 const TIPS: &[&str] = &[
@@ -19,21 +22,46 @@ const TIPS: &[&str] = &[
     "Отключай уведомления во время важных задач — это сохранит фокус 🔕",
 ];
 
-/// Обработчик команды /profile.
-pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let user_id = chat_id.0;
+/// Обработчик команды /profile через абстрактный транспорт.
+pub async fn handle_profile_command_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    nickname: Option<&str>,
+    db: Db,
+) -> HandlerResult {
+    let message = build_profile_message(user_id, nickname, db).await?;
+    let keyboard = profile_keyboard();
 
-    // Получаем данные пользователя
+    send_html_with_keyboard(transport, peer_id, &message, &keyboard).await
+}
+
+/// Временный Telegram entrypoint до переключения app/router на VK.
+pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
+    let peer_id = msg.chat.id.0;
+    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let nickname = msg
+        .from
+        .as_ref()
+        .and_then(|user| user.username.as_deref())
+        .map(|username| format!("@{}", username));
+    let transport = TelegramTransport::new(bot);
+
+    handle_profile_command_transport(&transport, peer_id, user_id, nickname.as_deref(), db).await
+}
+
+async fn build_profile_message(
+    user_id: i64,
+    nickname: Option<&str>,
+    db: Db,
+) -> anyhow::Result<String> {
     let user = db.ensure_user(user_id).await?;
     let record = db.ensure_record(user_id).await?;
 
-    // Собираем статистику
     let active_count = db.count_active_reminders(user_id).await.unwrap_or(0);
     let this_month = db.count_reminders_this_month(user_id).await.unwrap_or(0);
     let last_month = db.count_reminders_last_month(user_id).await.unwrap_or(0);
-    
-    // Считаем прирост
+
     let growth = if last_month > 0 {
         let diff = this_month as f64 - last_month as f64;
         let percent = (diff / last_month as f64) * 100.0;
@@ -48,7 +76,6 @@ pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerRe
         "0%".to_string()
     };
 
-    // Статус подписки
     let subscription_status = if record.is_active() {
         format!("активна до {}", record.expiry_formatted())
     } else if record.free_state == Some(1) {
@@ -57,16 +84,15 @@ pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerRe
         "не активна".to_string()
     };
 
-    // Количество подписок на каналы
-    let channel_subs_count = db.get_user_channel_subs(user_id).await
+    let channel_subs_count = db
+        .get_user_channel_subs(user_id)
+        .await
         .map(|subs| subs.len())
         .unwrap_or(0);
 
-    // Случайный совет
     let tip_index = (user_id as usize) % TIPS.len();
     let tip = TIPS[tip_index];
 
-    // Последнее напоминание
     let last_reminder = db.get_last_reminder(user_id).await.ok().flatten();
     let last_reminder_text = if let Some(rem) = last_reminder {
         let time_display = format_full_reminder_time_for_user(&rem.time, &user);
@@ -79,15 +105,11 @@ pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerRe
         String::new()
     };
 
-    // Никнейм (или ID)
-    let nickname = msg.from
-        .as_ref()
-        .and_then(|u| u.username.clone())
-        .map(|u| format!("@{}", u))
+    let nickname = nickname
+        .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("#{}", user_id));
 
-    // Формируем сообщение профиля
-    let message = format!(
+    Ok(format!(
         "👤 Профиль {}\n\n\
          📅 Напоминаний активно: <b>{}</b>\n\
          📈 Всего создано в этом месяце: <b>{}</b>\n\
@@ -106,21 +128,27 @@ pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerRe
         channel_subs_count,
         tip,
         last_reminder_text,
-    );
+    ))
+}
 
-    bot.send_message(chat_id, message)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(profile_keyboard())
-        .await?;
-
+async fn send_html_with_keyboard<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    text: &str,
+    keyboard: &TransportKeyboard,
+) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
     Ok(())
 }
 
 /// Обрезает текст до указанной длины.
 fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_len).collect();
+    if chars.next().is_none() {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_len])
+        format!("{}...", truncated)
     }
 }

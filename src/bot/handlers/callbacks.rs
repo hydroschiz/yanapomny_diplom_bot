@@ -9,6 +9,7 @@ use crate::bot::{
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
+use crate::transport::adapters::TelegramTransport;
 
 use super::commands::{
     start_utc_flow, AUTO_SNOOZE_PROMPT, SETUP_PROMPT, SNOOZE_PROMPT, UTC_SUCCESS_MESSAGE,
@@ -196,7 +197,8 @@ pub async fn handle_callback(
         "profile_referral" => {
             // Show referral program
             bot.answer_callback_query(cq.id).await?;
-            return super::referral::send_referral_message(&bot, chat_id, chat_id.0, &db).await;
+            let transport = TelegramTransport::new(bot);
+            return super::referral::send_referral_message(&transport, chat_id.0, chat_id.0, &db).await;
         }
         "profile_pay" => {
             // Show payment menu

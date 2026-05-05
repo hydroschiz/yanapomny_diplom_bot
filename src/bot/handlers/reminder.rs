@@ -1,8 +1,8 @@
 //! Reminder creation and management handlers.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 
 use crate::api::db::{Db, Reminder, User};
 use crate::api::llm_client::LlmClient;
@@ -10,10 +10,13 @@ use crate::api::llm_models::{ParsedReminder, ReminderType};
 use crate::api::time_calculator::{calculate_reminder_time, UserTimePrefs};
 use crate::bot::keyboards::{
     delete_keyboard, list_delete_keyboard, reminder_confirm_keyboard, reminder_edit_keyboard,
-    text_confirm_keyboard,
+    reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes, text_confirm_keyboard,
 };
 use crate::bot::router::{AppDialogue, HandlerResult};
 use crate::bot::states::{AppState, PendingReminder, PendingText};
+use crate::transport::dialogue_store::DialogueStore;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::{BotTransport, TransportKeyboard};
 use crate::utils::timezone::{
     user_datetime_string, user_has_timezone, user_local_time, user_offset_string_at,
 };
@@ -22,82 +25,602 @@ use crate::utils::timezone::{
 static LLM_CLIENT: std::sync::OnceLock<LlmClient> = std::sync::OnceLock::new();
 
 fn get_llm_client() -> &'static LlmClient {
-    LLM_CLIENT.get_or_init(|| {
-        LlmClient::from_env().expect("Failed to create LLM client")
-    })
+    LLM_CLIENT.get_or_init(|| LlmClient::from_env().expect("Failed to create LLM client"))
 }
 
+#[async_trait]
+trait ReminderStateStore {
+    async fn get_state(&self, user_id: i64) -> anyhow::Result<AppState>;
+    async fn update_state(&self, user_id: i64, state: AppState) -> anyhow::Result<()>;
+}
+
+#[async_trait]
+impl ReminderStateStore for DialogueStore {
+    async fn get_state(&self, user_id: i64) -> anyhow::Result<AppState> {
+        Ok(self.get(user_id))
+    }
+
+    async fn update_state(&self, user_id: i64, state: AppState) -> anyhow::Result<()> {
+        self.update(user_id, state);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderStateStore for AppDialogue {
+    async fn get_state(&self, _user_id: i64) -> anyhow::Result<AppState> {
+        Ok(self.get().await?.unwrap_or_default())
+    }
+
+    async fn update_state(&self, _user_id: i64, state: AppState) -> anyhow::Result<()> {
+        self.update(state).await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TelegramReminderTransport {
+    bot: Bot,
+}
+
+impl TelegramReminderTransport {
+    fn new(bot: Bot) -> Self {
+        Self { bot }
+    }
+}
+
+#[async_trait]
+impl BotTransport for TelegramReminderTransport {
+    async fn send_text(&self, peer_id: i64, text: &str) -> anyhow::Result<()> {
+        self.bot.send_message(ChatId(peer_id), text).await?;
+        Ok(())
+    }
+
+    async fn send_with_keyboard(
+        &self,
+        peer_id: i64,
+        text: &str,
+        keyboard: &TransportKeyboard,
+    ) -> anyhow::Result<()> {
+        let markup: teloxide::types::ReplyMarkup = keyboard.clone().into();
+        self.bot
+            .send_message(ChatId(peer_id), text)
+            .reply_markup(markup)
+            .await?;
+        Ok(())
+    }
+
+    async fn answer_callback(
+        &self,
+        event_id: &str,
+        _user_id: i64,
+        _peer_id: i64,
+        text: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let request = self
+            .bot
+            .answer_callback_query(teloxide::types::CallbackQueryId(event_id.to_string()));
+
+        match text {
+            Some(text) => request.text(text).await?,
+            None => request.await?,
+        };
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Transport-native handlers
+// ============================================================================
+
 /// Handle any text message in Idle state - ask for confirmation BEFORE sending to LLM.
+pub async fn handle_idle_text_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_idle_text_core(transport, peer_id, user_id, text, store, db).await
+}
+
+/// Start the flow of creating a reminder (confirmation -> LLM).
+/// Assumes subscription and user checks are already done.
+pub async fn start_reminder_creation_flow_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: String,
+    store: &DialogueStore,
+) -> HandlerResult {
+    start_reminder_creation_flow_core(transport, peer_id, user_id, text, store).await
+}
+
+/// Handle text confirmation - now send to LLM and show parsed result.
+pub async fn handle_text_confirm_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_text_confirm_core(transport, event_id, user_id, peer_id, store, db).await
+}
+
+/// Handle text cancel - user doesn't want to create reminder.
+pub async fn handle_text_cancel_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+) -> HandlerResult {
+    handle_text_cancel_core(transport, event_id, user_id, peer_id, store).await
+}
+
+/// Handle reminder confirmation callback.
+pub async fn handle_reminder_confirm_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_reminder_confirm_core(transport, event_id, user_id, peer_id, store, db).await
+}
+
+/// Handle reminder edit callback - ask for new text.
+pub async fn handle_reminder_edit_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+) -> HandlerResult {
+    handle_reminder_edit_core(transport, event_id, user_id, peer_id, store).await
+}
+
+/// Handle edited reminder text.
+pub async fn handle_reminder_edit_text_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_reminder_edit_text_core(transport, peer_id, user_id, text, store, db).await
+}
+
+/// Handle reminder cancellation.
+pub async fn handle_reminder_cancel_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+) -> HandlerResult {
+    handle_reminder_cancel_core(transport, event_id, user_id, peer_id, store).await
+}
+
+/// Handle /list command - show user's reminders.
+pub async fn handle_list_command_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    db: Db,
+) -> HandlerResult {
+    handle_list_command_core(transport, peer_id, db).await
+}
+
+/// Handle delete button press - start deletion flow.
+pub async fn handle_delete_start_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+) -> HandlerResult {
+    handle_delete_start_core(transport, event_id, user_id, peer_id, store).await
+}
+
+/// Handle deletion number input.
+pub async fn handle_deletion_input_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_deletion_input_core(transport, peer_id, user_id, text, store, db).await
+}
+
+/// Handle back button in deletion flow.
+pub async fn handle_delete_back_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    _payload: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_delete_back_core(transport, event_id, user_id, peer_id, store, db).await
+}
+
+/// Handle snooze callback: `snooze:{rem_id}:{code}`.
+pub async fn handle_snooze_callback_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    payload: &str,
+    db: Db,
+) -> HandlerResult {
+    let data = payload.strip_prefix("snooze:").unwrap_or(payload);
+    let parts: Vec<&str> = data.split(':').collect();
+    if parts.len() != 2 {
+        transport
+            .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный формат"))
+            .await?;
+        return Ok(());
+    }
+
+    let rem_id: i32 = match parts[0].parse() {
+        Ok(id) => id,
+        Err(_) => {
+            transport
+                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный ID напоминания"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let snooze_code = parts[1];
+    let minutes = match snooze_code_to_minutes(snooze_code) {
+        Some(m) => m,
+        None => {
+            transport
+                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный интервал"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let reminder = match db.find_reminder(rem_id).await? {
+        Some(r) => r,
+        None => {
+            transport
+                .answer_callback(event_id, user_id, peer_id, Some("Напоминание не найдено"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let new_time = db.snooze_reminder(rem_id, minutes).await?;
+    let user = db.ensure_user(peer_id).await?;
+    let time_display = crate::scheduler::format_full_reminder_time_for_user(&new_time, &user);
+    let snooze_label = snooze_code_to_label(snooze_code);
+    let message = format!(
+        "Напоминание отложено на {} ✅\n\n\
+         📅 {} ▹ {}",
+        snooze_label,
+        time_display,
+        html_escape(&reminder.text)
+    );
+    let keyboard = reminder_snoozed_keyboard(rem_id);
+
+    send_html_with_keyboard(transport, peer_id, &message, &keyboard).await?;
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+
+    Ok(())
+}
+
+/// Handle reminder done callback: `reminder_done:{rem_id}`.
+pub async fn handle_reminder_done_callback_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    payload: &str,
+    db: Db,
+) -> HandlerResult {
+    let data = payload.strip_prefix("reminder_done:").unwrap_or(payload);
+    let rem_id: i32 = match data.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            transport
+                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный ID напоминания"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let reminder = match db.find_reminder(rem_id).await? {
+        Some(r) => r,
+        None => {
+            transport
+                .answer_callback(event_id, user_id, peer_id, Some("Напоминание уже удалено"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let user = db.ensure_user(peer_id).await?;
+    let time_display = crate::scheduler::format_full_reminder_time_for_user(&reminder.time, &user);
+    let is_recurring = !reminder.delay.is_empty();
+
+    let message = if is_recurring {
+        format!(
+            "Напоминание отмечено ✅\n\n\
+             📅 {} ▹ {}\n\n\
+             🔄 Это периодическое напоминание, оно продолжит работать.",
+            time_display,
+            html_escape(&reminder.text)
+        )
+    } else {
+        db.complete_reminder(rem_id).await?;
+        format!(
+            "Напоминание выполнено ✅ 📅 {} ▹ {}",
+            time_display,
+            html_escape(&reminder.text)
+        )
+    };
+
+    send_html_text(transport, peer_id, &message).await?;
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Telegram compatibility entrypoints
+// ============================================================================
+
 pub async fn handle_idle_text(
     bot: Bot,
     msg: Message,
     dialogue: AppDialogue,
     db: Db,
 ) -> HandlerResult {
-    let chat_id = msg.chat.id;
     let text = match msg.text() {
-        Some(t) => t.trim(),
-        None => return Ok(()), // Ignore non-text messages
+        Some(t) => t,
+        None => return Ok(()),
     };
+    let peer_id = msg.chat.id.0;
+    let user_id = message_user_id(&msg).unwrap_or(peer_id);
+    let transport = TelegramReminderTransport::new(bot);
 
-    // Skip empty messages
-    if text.is_empty() {
-        return Ok(());
-    }
-
-    // Skip if it looks like a command
-    if text.starts_with('/') {
-        return Ok(());
-    }
-
-    // Skip "Профиль" button (will be handled separately later)
-    if text == "Профиль" {
-        return Ok(());
-    }
-
-    // Get user to check if timezone is set
-    let user = match db.find_user(chat_id.0).await? {
-        Some(u) => u,
-        None => {
-            bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /start")
-                .await?;
-            return Ok(());
-        }
-    };
-
-    // Check if timezone is set
-    if !user_has_timezone(&user) {
-        bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /utc")
-            .await?;
-        return Ok(());
-    }
-
-    // Fresh user should immediately get a trial/default record after onboarding.
-    let record = db.ensure_record(chat_id.0).await?;
-    if !record.is_active() {
-        let no_subscription_message = 
-            "⚠️ <b>Подписка не активна</b>\n\n\
-            Для создания напоминаний необходима активная подписка.\n\n\
-            Используйте команду /pay для оформления подписки.";
-        
-        bot.send_message(chat_id, no_subscription_message)
-            .parse_mode(ParseMode::Html)
-            .await?;
-        return Ok(());
-    }
-
-    start_reminder_creation_flow(bot, chat_id, text.to_string(), dialogue).await
+    handle_idle_text_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
-/// Start the flow of creating a reminder (confirmation -> LLM).
-/// Assumes subscription and user checks are already done.
 pub async fn start_reminder_creation_flow(
     bot: Bot,
     chat_id: ChatId,
     text: String,
     dialogue: AppDialogue,
 ) -> HandlerResult {
-    // Ask for confirmation BEFORE sending to LLM
+    let transport = TelegramReminderTransport::new(bot);
+
+    start_reminder_creation_flow_core(&transport, chat_id.0, chat_id.0, text, &dialogue).await
+}
+
+pub async fn handle_text_confirm(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_text_confirm_core(&transport, &event_id, user_id, peer_id, &dialogue, db).await
+}
+
+pub async fn handle_text_cancel(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_text_cancel_core(&transport, &event_id, user_id, peer_id, &dialogue).await
+}
+
+pub async fn handle_reminder_confirm(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_reminder_confirm_core(&transport, &event_id, user_id, peer_id, &dialogue, db).await
+}
+
+pub async fn handle_reminder_edit(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_reminder_edit_core(&transport, &event_id, user_id, peer_id, &dialogue).await
+}
+
+pub async fn handle_reminder_edit_text(
+    bot: Bot,
+    msg: Message,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let text = match msg.text() {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+    let peer_id = msg.chat.id.0;
+    let user_id = message_user_id(&msg).unwrap_or(peer_id);
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_reminder_edit_text_core(&transport, peer_id, user_id, text, &dialogue, db).await
+}
+
+pub async fn handle_reminder_cancel(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_reminder_cancel_core(&transport, &event_id, user_id, peer_id, &dialogue).await
+}
+
+pub async fn handle_list_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
+    let transport = TelegramReminderTransport::new(bot);
+    handle_list_command_core(&transport, msg.chat.id.0, db).await
+}
+
+pub async fn handle_delete_start(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_delete_start_core(&transport, &event_id, user_id, peer_id, &dialogue).await
+}
+
+pub async fn handle_deletion_input(
+    bot: Bot,
+    msg: Message,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let text = match msg.text() {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+    let peer_id = msg.chat.id.0;
+    let user_id = message_user_id(&msg).unwrap_or(peer_id);
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_deletion_input_core(&transport, peer_id, user_id, text, &dialogue, db).await
+}
+
+pub async fn handle_delete_back(
+    bot: Bot,
+    q: CallbackQuery,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let Some((event_id, user_id, peer_id)) = callback_context(&q) else {
+        return Ok(());
+    };
+    let transport = TelegramReminderTransport::new(bot);
+
+    handle_delete_back_core(&transport, &event_id, user_id, peer_id, &dialogue, db).await
+}
+
+// ============================================================================
+// Shared handler implementation
+// ============================================================================
+
+async fn handle_idle_text_core<T, S>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &S,
+    db: Db,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let text = text.trim();
+
+    if text.is_empty() || text.starts_with('/') || text == "Профиль" {
+        return Ok(());
+    }
+
+    let user = match db.find_user(peer_id).await? {
+        Some(u) => u,
+        None => {
+            transport
+                .send_text(
+                    peer_id,
+                    "Пожалуйста, сначала настройте часовой пояс командой /start",
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if !user_has_timezone(&user) {
+        transport
+            .send_text(
+                peer_id,
+                "Пожалуйста, сначала настройте часовой пояс командой /utc",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let record = db.ensure_record(peer_id).await?;
+    if !record.is_active() {
+        let no_subscription_message = "⚠️ <b>Подписка не активна</b>\n\n\
+            Для создания напоминаний необходима активная подписка.\n\n\
+            Используйте команду /pay для оформления подписки.";
+
+        send_html_text(transport, peer_id, no_subscription_message).await?;
+        return Ok(());
+    }
+
+    start_reminder_creation_flow_core(transport, peer_id, user_id, text.to_string(), store).await
+}
+
+async fn start_reminder_creation_flow_core<T, S>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: String,
+    store: &S,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
     let confirmation_text = format!(
         "📝 <b>Создать напоминание из этого текста?</b>\n\n\
         <i>{}</i>",
@@ -105,77 +628,78 @@ pub async fn start_reminder_creation_flow(
     );
 
     let keyboard = text_confirm_keyboard();
+    send_html_with_keyboard(transport, peer_id, &confirmation_text, &keyboard).await?;
 
-    bot.send_message(chat_id, confirmation_text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
-        .await?;
-
-    // Save text in dialogue state
     let pending = PendingText { text };
-    dialogue.update(AppState::AwaitingTextConfirmation { pending }).await?;
+    store
+        .update_state(user_id, AppState::AwaitingTextConfirmation { pending })
+        .await?;
 
     Ok(())
 }
 
-/// Handle text confirmation - now send to LLM and show parsed result.
-pub async fn handle_text_confirm(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
+async fn handle_text_confirm_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
     db: Db,
-) -> HandlerResult {
-    let msg = match q.message.as_ref() {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-    let chat_id = msg.chat().id;
-
-    let state = dialogue.get().await?.unwrap_or_default();
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let state = store.get_state(user_id).await?;
     let pending_text = match state {
         AppState::AwaitingTextConfirmation { pending } => pending,
         _ => {
-            bot.answer_callback_query(q.id.clone()).await?;
+            transport
+                .answer_callback(event_id, user_id, peer_id, None)
+                .await?;
             return Ok(());
         }
     };
 
-    bot.answer_callback_query(q.id.clone()).await?;
-
-    // Edit message to show processing
-    bot.edit_message_text(chat_id, msg.id(), "⏳ Анализирую текст напоминания...")
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+    transport
+        .send_text(peer_id, "⏳ Анализирую текст напоминания...")
         .await?;
 
-    // Get user for timezone
-    let user = match db.find_user(chat_id.0).await? {
+    let user = match db.find_user(peer_id).await? {
         Some(u) => u,
         None => {
-            bot.edit_message_text(chat_id, msg.id(), "❌ Пользователь не найден")
+            transport
+                .send_text(peer_id, "❌ Пользователь не найден")
                 .await?;
-            dialogue.update(AppState::Idle).await?;
+            store.update_state(user_id, AppState::Idle).await?;
             return Ok(());
         }
     };
 
-    // Call LLM API with user's timezone context
     let llm_client = get_llm_client();
     let user_tz = get_user_timezone_str(&user);
     let user_dt = get_user_datetime_str(&user);
-    let llm_response = match llm_client.parse_reminder(&pending_text.text, &user_tz, &user_dt).await {
+    let llm_response = match llm_client
+        .parse_reminder(&pending_text.text, &user_tz, &user_dt)
+        .await
+    {
         Ok(resp) => resp,
         Err(e) => {
             tracing::error!("LLM API error: {}", e);
-            bot.edit_message_text(
-                chat_id,
-                msg.id(),
-                "❌ Не удалось обработать текст. Попробуйте ещё раз.",
-            ).await?;
-            dialogue.update(AppState::Idle).await?;
+            transport
+                .send_text(
+                    peer_id,
+                    "❌ Не удалось обработать текст. Попробуйте ещё раз.",
+                )
+                .await?;
+            store.update_state(user_id, AppState::Idle).await?;
             return Ok(());
         }
     };
 
-    // Check if parsing was successful
     if !llm_response.is_success() {
         let (error_code, error_msg) = llm_response
             .error
@@ -191,52 +715,44 @@ pub async fn handle_text_confirm(
             format!("❌ Не удалось распознать напоминание: {}", error_msg)
         };
 
-        bot.edit_message_text(
-            chat_id,
-            msg.id(),
-            response_text,
-        ).await?;
-        dialogue.update(AppState::Idle).await?;
+        transport.send_text(peer_id, &response_text).await?;
+        store.update_state(user_id, AppState::Idle).await?;
         return Ok(());
     }
 
     let parsed = match llm_response.reminder {
         Some(r) => r,
         None => {
-            bot.edit_message_text(
-                chat_id,
-                msg.id(),
-                "❌ Не удалось распознать напоминание. Попробуйте ещё раз.",
-            ).await?;
-            dialogue.update(AppState::Idle).await?;
+            transport
+                .send_text(
+                    peer_id,
+                    "❌ Не удалось распознать напоминание. Попробуйте ещё раз.",
+                )
+                .await?;
+            store.update_state(user_id, AppState::Idle).await?;
             return Ok(());
         }
     };
 
-    // Calculate reminder time
     let prefs = user_time_prefs(&user);
     let reminder_time = match calculate_reminder_time(&parsed, Utc::now(), &prefs) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Time calculation error: {}", e);
-            bot.edit_message_text(
-                chat_id,
-                msg.id(),
-                "❌ Не удалось определить время напоминания.",
-            ).await?;
-            dialogue.update(AppState::Idle).await?;
+            transport
+                .send_text(peer_id, "❌ Не удалось определить время напоминания.")
+                .await?;
+            store.update_state(user_id, AppState::Idle).await?;
             return Ok(());
         }
     };
 
-    // Format time for display
     let time_display = format_reminder_time(reminder_time, &user);
     let type_str = match parsed.reminder_type {
         ReminderType::OneTime => "разовое",
         ReminderType::Recurring => "повторяющееся",
     };
 
-    // Show parsed result with confirmation
     let confirmation_text = format!(
         "📝 <b>Подтвердите напоминание:</b>\n\n\
         📌 <b>Текст:</b> {}\n\
@@ -249,13 +765,8 @@ pub async fn handle_text_confirm(
     );
 
     let keyboard = reminder_confirm_keyboard();
+    send_html_with_keyboard(transport, peer_id, &confirmation_text, &keyboard).await?;
 
-    bot.edit_message_text(chat_id, msg.id(), confirmation_text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard.into())
-        .await?;
-
-    // Save pending reminder in dialogue state
     let pending = PendingReminder {
         original_text: pending_text.text,
         description: parsed.description.clone(),
@@ -263,72 +774,73 @@ pub async fn handle_text_confirm(
         parsed_json: serde_json::to_string(&parsed)?,
     };
 
-    dialogue.update(AppState::AwaitingReminderConfirmation { pending }).await?;
+    store
+        .update_state(user_id, AppState::AwaitingReminderConfirmation { pending })
+        .await?;
 
     Ok(())
 }
 
-/// Handle text cancel - user doesn't want to create reminder.
-pub async fn handle_text_cancel(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
-) -> HandlerResult {
-    let msg = match q.message.as_ref() {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-    let chat_id = msg.chat().id;
-
-    bot.answer_callback_query(q.id.clone()).await?;
-    
-    // Delete the confirmation message
-    let _ = bot.delete_message(chat_id, msg.id()).await;
-
-    dialogue.update(AppState::Idle).await?;
+async fn handle_text_cancel_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+    transport
+        .send_text(peer_id, "❌ Создание напоминания отменено.")
+        .await?;
+    store.update_state(user_id, AppState::Idle).await?;
 
     Ok(())
 }
 
-/// Handle reminder confirmation callback.
-pub async fn handle_reminder_confirm(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
+async fn handle_reminder_confirm_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
     db: Db,
-) -> HandlerResult {
-    let chat_id = match q.message.as_ref() {
-        Some(m) => m.chat().id,
-        None => return Ok(()),
-    };
-
-    let state = dialogue.get().await?.unwrap_or_default();
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let state = store.get_state(user_id).await?;
     let pending = match state {
         AppState::AwaitingReminderConfirmation { pending } => pending,
         _ => {
-            bot.answer_callback_query(q.id.clone()).await?;
+            transport
+                .answer_callback(event_id, user_id, peer_id, None)
+                .await?;
             return Ok(());
         }
     };
 
-    // Parse the saved reminder JSON
     let parsed: ParsedReminder = serde_json::from_str(&pending.parsed_json)?;
-
-    // Get user for time preferences
-    let user = db.find_user(chat_id.0).await?.unwrap_or_else(|| User::new(chat_id.0));
+    let user = db
+        .find_user(peer_id)
+        .await?
+        .unwrap_or_else(|| User::new(peer_id));
     let prefs = user_time_prefs(&user);
-
-    // Calculate reminder time
     let reminder_time = calculate_reminder_time(&parsed, Utc::now(), &prefs)?;
 
-    // Create reminder in database
     let reminder = Reminder {
-        chat_id: chat_id.0,
+        chat_id: peer_id,
         text: parsed.description.clone(),
         delay: parsed.to_legacy_delay(),
         time: reminder_time,
         status: "active".to_string(),
-        rem_id: None, // Will be set by insert_reminder
+        rem_id: None,
         messageID: None,
         snooze_time: None,
         retry_count: 0,
@@ -337,15 +849,10 @@ pub async fn handle_reminder_confirm(
 
     let saved_reminder = db.insert_reminder(reminder).await?;
 
-    // Answer callback
-    bot.answer_callback_query(q.id.clone()).await?;
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
 
-    // Delete confirmation message
-    if let Some(msg) = &q.message {
-        let _ = bot.delete_message(chat_id, msg.id()).await;
-    }
-
-    // Send success message (use HTML for simpler escaping)
     let success_text = format!(
         "✅ <b>Напоминание создано!</b>\n\n\
         📌 {}\n\
@@ -356,325 +863,253 @@ pub async fn handle_reminder_confirm(
         saved_reminder.rem_id.unwrap_or(0)
     );
 
-    bot.send_message(chat_id, success_text)
-        .parse_mode(ParseMode::Html)
-        .await?;
-
-    // Reset dialogue to Idle
-    dialogue.update(AppState::Idle).await?;
+    send_html_text(transport, peer_id, &success_text).await?;
+    store.update_state(user_id, AppState::Idle).await?;
 
     Ok(())
 }
 
-/// Handle reminder edit callback - ask for new text.
-pub async fn handle_reminder_edit(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
-) -> HandlerResult {
-    let chat_id = match q.message.as_ref() {
-        Some(m) => m.chat().id,
-        None => return Ok(()),
-    };
-
-    let state = dialogue.get().await?.unwrap_or_default();
+async fn handle_reminder_edit_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let state = store.get_state(user_id).await?;
     let pending = match state {
         AppState::AwaitingReminderConfirmation { pending } => pending,
         _ => {
-            bot.answer_callback_query(q.id.clone()).await?;
+            transport
+                .answer_callback(event_id, user_id, peer_id, None)
+                .await?;
             return Ok(());
         }
     };
 
-    bot.answer_callback_query(q.id.clone()).await?;
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
 
-    // Delete confirmation message
-    if let Some(msg) = &q.message {
-        let _ = bot.delete_message(chat_id, msg.id()).await;
-    }
-
-    // Ask for new text
     let keyboard = reminder_edit_keyboard();
+    let text = format!(
+        "✏️ Введите новый текст напоминания:\n\n<i>Текущий:</i> {}",
+        html_escape(&pending.original_text)
+    );
 
-    bot.send_message(
-        chat_id,
-        format!(
-            "✏️ Введите новый текст напоминания:\n\n<i>Текущий:</i> {}",
-            html_escape(&pending.original_text)
-        ),
-    )
-    .parse_mode(ParseMode::Html)
-    .reply_markup(keyboard)
-    .await?;
-
-    dialogue.update(AppState::AwaitingReminderEdit { pending }).await?;
-
-    Ok(())
-}
-
-/// Handle edited reminder text.
-pub async fn handle_reminder_edit_text(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let new_text = match msg.text() {
-        Some(t) => t.trim(),
-        None => return Ok(()),
-    };
-
-    if new_text.is_empty() {
-        bot.send_message(chat_id, "Текст не может быть пустым. Введите новый текст:").await?;
-        return Ok(());
-    }
-
-    // Reset to Idle and process as new reminder
-    dialogue.update(AppState::Idle).await?;
-
-    // Re-process the new text
-    handle_idle_text(bot, msg, dialogue, db).await
-}
-
-/// Handle reminder cancellation.
-pub async fn handle_reminder_cancel(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
-) -> HandlerResult {
-    let chat_id = match q.message.as_ref() {
-        Some(m) => m.chat().id,
-        None => return Ok(()),
-    };
-
-    bot.answer_callback_query(q.id.clone()).await?;
-
-    // Delete message
-    if let Some(msg) = &q.message {
-        let _ = bot.delete_message(chat_id, msg.id()).await;
-    }
-
-    bot.send_message(chat_id, "❌ Создание напоминания отменено.").await?;
-
-    dialogue.update(AppState::Idle).await?;
-
-    Ok(())
-}
-
-// ============================================================================
-// /list command
-// ============================================================================
-
-/// Handle /list command - show user's reminders.
-pub async fn handle_list_command(
-    bot: Bot,
-    msg: Message,
-    db: Db,
-) -> HandlerResult {
-    let chat_id = msg.chat.id;
-
-    let reminders = db.get_user_reminders(chat_id.0).await?;
-
-    if reminders.is_empty() {
-        bot.send_message(chat_id, "📭 У вас нет активных напоминаний.").await?;
-        return Ok(());
-    }
-
-    // Get user for timezone
-    let user = db.find_user(chat_id.0).await?.unwrap_or_else(|| User::new(chat_id.0));
-
-    // Group reminders by month
-    let mut text = String::from("📌 <b>Активные напоминания</b>\n");
-    let mut current_month: Option<(i32, u32)> = None;
-    let mut index = 1;
-
-    for reminder in &reminders {
-        let local_time = convert_to_user_tz(reminder.time, &user);
-        let year = local_time.year();
-        let month = local_time.month();
-
-        // Add month header if changed
-        if current_month != Some((year, month)) {
-            current_month = Some((year, month));
-            let month_name = get_russian_month_name(month);
-            text.push_str(&format!("\n📅 <b>{} {} г.</b>\n", month_name, year));
-        }
-
-        // Format reminder line
-        let day = local_time.day();
-        let weekday = get_russian_weekday_short(local_time.weekday());
-        let time_str = format!("{:02}:{:02}", local_time.hour(), local_time.minute());
-        let escaped_text = html_escape(&reminder.text);
-
-        text.push_str(&format!(
-            "{}. {:02}.{:02} ({}, {}) ▹ {}\n",
-            index,
-            day,
-            month,
-            weekday,
-            time_str,
-            escaped_text
-        ));
-
-        index += 1;
-    }
-
-    // Add delete button
-    let keyboard = list_delete_keyboard();
-
-    bot.send_message(chat_id, text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
+    send_html_with_keyboard(transport, peer_id, &text, &keyboard).await?;
+    store
+        .update_state(user_id, AppState::AwaitingReminderEdit { pending })
         .await?;
 
     Ok(())
 }
 
-/// Handle delete button press - start deletion flow.
-pub async fn handle_delete_start(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
-) -> HandlerResult {
-    let chat_id = match q.message.as_ref() {
-        Some(m) => m.chat().id,
-        None => return Ok(()),
-    };
+async fn handle_reminder_edit_text_core<T, S>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &S,
+    db: Db,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let new_text = text.trim();
 
-    bot.answer_callback_query(q.id.clone()).await?;
+    if new_text.is_empty() {
+        transport
+            .send_text(peer_id, "Текст не может быть пустым. Введите новый текст:")
+            .await?;
+        return Ok(());
+    }
 
-    let keyboard = delete_keyboard();
+    store.update_state(user_id, AppState::Idle).await?;
+    handle_idle_text_core(transport, peer_id, user_id, new_text, store, db).await
+}
 
-    bot.send_message(
-        chat_id,
-        "🗑 Введите номер напоминания для удаления:",
-    )
-    .reply_markup(keyboard)
-    .await?;
-
-    dialogue.update(AppState::AwaitingReminderDeletion).await?;
+async fn handle_reminder_cancel_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+    transport
+        .send_text(peer_id, "❌ Создание напоминания отменено.")
+        .await?;
+    store.update_state(user_id, AppState::Idle).await?;
 
     Ok(())
 }
 
-/// Handle deletion number input.
-pub async fn handle_deletion_input(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
+async fn handle_list_command_core<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
     db: Db,
 ) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let text = match msg.text() {
-        Some(t) => t.trim(),
-        None => return Ok(()),
-    };
+    let reminders = db.get_user_reminders(peer_id).await?;
 
-    // Parse number
-    let number: usize = match text.parse() {
+    if reminders.is_empty() {
+        transport
+            .send_text(peer_id, "📭 У вас нет активных напоминаний.")
+            .await?;
+        return Ok(());
+    }
+
+    let user = db
+        .find_user(peer_id)
+        .await?
+        .unwrap_or_else(|| User::new(peer_id));
+    let text = format_reminders_list(&reminders, &user);
+    let keyboard = list_delete_keyboard();
+
+    send_html_with_keyboard(transport, peer_id, &text, &keyboard).await?;
+
+    Ok(())
+}
+
+async fn handle_delete_start_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+
+    let keyboard = delete_keyboard();
+    transport
+        .send_with_keyboard(
+            peer_id,
+            "🗑 Введите номер напоминания для удаления:",
+            &keyboard,
+        )
+        .await?;
+
+    store
+        .update_state(user_id, AppState::AwaitingReminderDeletion)
+        .await?;
+
+    Ok(())
+}
+
+async fn handle_deletion_input_core<T, S>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &S,
+    db: Db,
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    let number: usize = match text.trim().parse() {
         Ok(n) if n > 0 => n,
         _ => {
-            bot.send_message(chat_id, "❌ Введите корректный номер напоминания (число больше 0):").await?;
+            transport
+                .send_text(
+                    peer_id,
+                    "❌ Введите корректный номер напоминания (число больше 0):",
+                )
+                .await?;
             return Ok(());
         }
     };
 
-    // Get user's reminders
-    let reminders = db.get_user_reminders(chat_id.0).await?;
+    let reminders = db.get_user_reminders(peer_id).await?;
 
     if number > reminders.len() {
-        bot.send_message(
-            chat_id,
-            format!("❌ Напоминание с номером {} не найдено. У вас {} напоминаний.", number, reminders.len()),
-        ).await?;
+        transport
+            .send_text(
+                peer_id,
+                &format!(
+                    "❌ Напоминание с номером {} не найдено. У вас {} напоминаний.",
+                    number,
+                    reminders.len()
+                ),
+            )
+            .await?;
         return Ok(());
     }
 
-    // Get the reminder to delete
     let reminder_to_delete = &reminders[number - 1];
     let rem_id = reminder_to_delete.rem_id.unwrap_or(0);
-
-    // Delete reminder
-    let deleted = db.delete_reminder(chat_id.0, rem_id).await?;
+    let deleted = db.delete_reminder(peer_id, rem_id).await?;
 
     if deleted {
-        bot.send_message(
-            chat_id,
-            format!("✅ Напоминание #{} \"{}\" удалено.", number, reminder_to_delete.text),
-        ).await?;
+        transport
+            .send_text(
+                peer_id,
+                &format!(
+                    "✅ Напоминание #{} \"{}\" удалено.",
+                    number, reminder_to_delete.text
+                ),
+            )
+            .await?;
     } else {
-        bot.send_message(chat_id, "❌ Не удалось удалить напоминание. Попробуйте ещё раз.").await?;
+        transport
+            .send_text(
+                peer_id,
+                "❌ Не удалось удалить напоминание. Попробуйте ещё раз.",
+            )
+            .await?;
     }
 
-    dialogue.update(AppState::Idle).await?;
+    store.update_state(user_id, AppState::Idle).await?;
 
     Ok(())
 }
 
-/// Handle back button in deletion flow.
-pub async fn handle_delete_back(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
+async fn handle_delete_back_core<T, S>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &S,
     db: Db,
-) -> HandlerResult {
-    let chat_id = match q.message.as_ref() {
-        Some(m) => m.chat().id,
-        None => return Ok(()),
-    };
+) -> HandlerResult
+where
+    T: BotTransport,
+    S: ReminderStateStore + Sync,
+{
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
 
-    bot.answer_callback_query(q.id.clone()).await?;
+    store.update_state(user_id, AppState::Idle).await?;
 
-    // Delete the deletion prompt message
-    if let Some(msg) = &q.message {
-        let _ = bot.delete_message(chat_id, msg.id()).await;
-    }
-
-    // Reset to Idle
-    dialogue.update(AppState::Idle).await?;
-
-    // Show list again
-    let reminders = db.get_user_reminders(chat_id.0).await?;
+    let reminders = db.get_user_reminders(peer_id).await?;
     if !reminders.is_empty() {
-        // Get user for timezone
-        let user = db.find_user(chat_id.0).await?.unwrap_or_else(|| User::new(chat_id.0));
-
-        // Group reminders by month
-        let mut text = String::from("📌 <b>Активные напоминания</b>\n");
-        let mut current_month: Option<(i32, u32)> = None;
-        let mut index = 1;
-
-        for reminder in &reminders {
-            let local_time = convert_to_user_tz(reminder.time, &user);
-            let year = local_time.year();
-            let month = local_time.month();
-
-            if current_month != Some((year, month)) {
-                current_month = Some((year, month));
-                let month_name = get_russian_month_name(month);
-                text.push_str(&format!("\n📅 <b>{} {} г.</b>\n", month_name, year));
-            }
-
-            let day = local_time.day();
-            let weekday = get_russian_weekday_short(local_time.weekday());
-            let time_str = format!("{:02}:{:02}", local_time.hour(), local_time.minute());
-            let escaped_text = html_escape(&reminder.text);
-
-            text.push_str(&format!(
-                "{}. {:02}.{:02} ({}, {}) ▹ {}\n",
-                index, day, month, weekday, time_str, escaped_text
-            ));
-
-            index += 1;
-        }
-
+        let user = db
+            .find_user(peer_id)
+            .await?
+            .unwrap_or_else(|| User::new(peer_id));
+        let text = format_reminders_list(&reminders, &user);
         let keyboard = list_delete_keyboard();
 
-        bot.send_message(chat_id, text)
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboard)
-            .await?;
+        send_html_with_keyboard(transport, peer_id, &text, &keyboard).await?;
     }
 
     Ok(())
@@ -683,6 +1118,70 @@ pub async fn handle_delete_back(
 // ============================================================================
 // Helper functions
 // ============================================================================
+
+fn message_user_id(msg: &Message) -> Option<i64> {
+    msg.from.as_ref().map(|user| user.id.0 as i64)
+}
+
+fn callback_context(q: &CallbackQuery) -> Option<(String, i64, i64)> {
+    let peer_id = q.message.as_ref()?.chat().id.0;
+    let user_id = q.from.id.0 as i64;
+
+    Some((q.id.0.clone(), user_id, peer_id))
+}
+
+async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_text(peer_id, &text).await?;
+    Ok(())
+}
+
+async fn send_html_with_keyboard<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    text: &str,
+    keyboard: &TransportKeyboard,
+) -> HandlerResult {
+    let text = strip_html(text);
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
+    Ok(())
+}
+
+fn format_reminders_list(reminders: &[Reminder], user: &User) -> String {
+    let mut text = String::from("📌 <b>Активные напоминания</b>\n");
+    let mut current_month: Option<(i32, u32)> = None;
+
+    for (index, reminder) in reminders.iter().enumerate() {
+        let local_time = convert_to_user_tz(reminder.time, user);
+        let year = local_time.year();
+        let month = local_time.month();
+
+        if current_month != Some((year, month)) {
+            current_month = Some((year, month));
+            let month_name = get_russian_month_name(month);
+            text.push_str(&format!("\n📅 <b>{} {} г.</b>\n", month_name, year));
+        }
+
+        let day = local_time.day();
+        let weekday = get_russian_weekday_short(local_time.weekday());
+        let time_str = format!("{:02}:{:02}", local_time.hour(), local_time.minute());
+        let escaped_text = html_escape(&reminder.text);
+
+        text.push_str(&format!(
+            "{}. {:02}.{:02} ({}, {}) ▹ {}\n",
+            index + 1,
+            day,
+            month,
+            weekday,
+            time_str,
+            escaped_text
+        ));
+    }
+
+    text
+}
 
 fn user_time_prefs(user: &User) -> UserTimePrefs {
     UserTimePrefs::from_db(
@@ -698,7 +1197,7 @@ fn user_time_prefs(user: &User) -> UserTimePrefs {
 fn format_reminder_time(time: DateTime<Utc>, user: &User) -> String {
     let local = user_local_time(user, time);
     let weekday = get_russian_weekday(local.weekday());
-    
+
     format!(
         "{:02}.{:02}.{} ({}) в {:02}:{:02}",
         local.day(),

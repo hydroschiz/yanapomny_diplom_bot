@@ -2,13 +2,16 @@
 
 use regex::Regex;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use tracing::info;
 
 use crate::api::db::{ChannelSubscription, Db, Platform};
 use crate::bot::keyboards::channel_subs_keyboard;
 use crate::bot::router::{AppDialogue, HandlerResult};
 use crate::bot::states::AppState;
+use crate::transport::adapters::TelegramTransport;
+use crate::transport::dialogue_store::DialogueStore;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::{BotTransport, TransportKeyboard};
 
 // ============================================================================
 // URL Parsing
@@ -25,11 +28,7 @@ pub struct ParsedChannel {
 /// Parse Twitch or YouTube URL to extract channel info.
 pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
     let url = url.trim();
-    
-    // Twitch patterns
-    // https://twitch.tv/username
-    // https://www.twitch.tv/username
-    // twitch.tv/username
+
     let twitch_re = Regex::new(r"(?:https?://)?(?:www\.)?twitch\.tv/([a-zA-Z0-9_]+)").ok()?;
     if let Some(caps) = twitch_re.captures(url) {
         let username = caps.get(1)?.as_str().to_lowercase();
@@ -40,13 +39,9 @@ pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
             url: format!("https://twitch.tv/{}", username),
         });
     }
-    
-    // YouTube patterns
-    // https://youtube.com/@username
-    // https://www.youtube.com/@username
-    // https://youtube.com/channel/UCxxxx
-    // https://www.youtube.com/c/channelname
-    let youtube_handle_re = Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/@([a-zA-Z0-9_-]+)").ok()?;
+
+    let youtube_handle_re =
+        Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/@([a-zA-Z0-9_-]+)").ok()?;
     if let Some(caps) = youtube_handle_re.captures(url) {
         let handle = caps.get(1)?.as_str();
         return Some(ParsedChannel {
@@ -56,8 +51,9 @@ pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
             url: format!("https://youtube.com/@{}", handle),
         });
     }
-    
-    let youtube_channel_re = Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/channel/([a-zA-Z0-9_-]+)").ok()?;
+
+    let youtube_channel_re =
+        Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/channel/([a-zA-Z0-9_-]+)").ok()?;
     if let Some(caps) = youtube_channel_re.captures(url) {
         let channel_id = caps.get(1)?.as_str();
         return Some(ParsedChannel {
@@ -67,8 +63,9 @@ pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
             url: format!("https://youtube.com/channel/{}", channel_id),
         });
     }
-    
-    let youtube_c_re = Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/c/([a-zA-Z0-9_-]+)").ok()?;
+
+    let youtube_c_re =
+        Regex::new(r"(?:https?://)?(?:www\.)?youtube\.com/c/([a-zA-Z0-9_-]+)").ok()?;
     if let Some(caps) = youtube_c_re.captures(url) {
         let name = caps.get(1)?.as_str();
         return Some(ParsedChannel {
@@ -78,7 +75,7 @@ pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
             url: format!("https://youtube.com/c/{}", name),
         });
     }
-    
+
     None
 }
 
@@ -86,21 +83,27 @@ pub fn parse_channel_url(url: &str) -> Option<ParsedChannel> {
 // Command Handler
 // ============================================================================
 
-/// Handle /subs command - show subscriptions list.
-pub async fn command_subs(bot: Bot, msg: Message, db: Db) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let user_id = chat_id.0;
-
+/// Handle /subs command through transport abstraction.
+pub async fn command_subs_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    db: Db,
+) -> HandlerResult {
     let subs = db.get_user_channel_subs(user_id).await?;
     let text = format_subs_message(&subs);
     let keyboard = channel_subs_keyboard();
 
-    bot.send_message(chat_id, text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
-        .await?;
+    send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
+}
 
-    Ok(())
+/// Временный Telegram entrypoint до переключения app/router на VK.
+pub async fn command_subs(bot: Bot, msg: Message, db: Db) -> HandlerResult {
+    let peer_id = msg.chat.id.0;
+    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let transport = TelegramTransport::new(bot);
+
+    command_subs_transport(&transport, peer_id, user_id, db).await
 }
 
 /// Format subscriptions list message.
@@ -118,7 +121,10 @@ fn format_subs_message(subs: &[ChannelSubscription]) -> String {
                     Platform::Twitch => "🟣",
                     Platform::Youtube => "🔴",
                 };
-                format!("{}. {} <a href=\"{}\">{}</a>", s.sub_num, icon, s.url, s.channel_name)
+                format!(
+                    "{}. {} <a href=\"{}\">{}</a>",
+                    s.sub_num, icon, s.url, s.channel_name
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -131,63 +137,115 @@ fn format_subs_message(subs: &[ChannelSubscription]) -> String {
 // Text Handlers for Adding/Deleting Subscriptions
 // ============================================================================
 
-/// Handle text in AwaitingChannelUrl state - user sends a channel URL.
+/// Handle text with channel URL through transport abstraction.
+pub async fn handle_channel_url_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_channel_url_core(transport, peer_id, user_id, text, Some(store), None, db).await
+}
+
+/// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn handle_channel_url(
     bot: Bot,
     msg: Message,
     dialogue: AppDialogue,
     db: Db,
 ) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let user_id = chat_id.0;
+    let text = msg.text().unwrap_or("");
+    let peer_id = msg.chat.id.0;
+    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let transport = TelegramTransport::new(bot);
 
-    let text = match msg.text() {
-        Some(t) => t.trim(),
-        None => {
-            bot.send_message(chat_id, "Пожалуйста, отправь ссылку на канал Twitch или YouTube.")
-                .await?;
-            return Ok(());
-        }
-    };
+    handle_channel_url_core(&transport, peer_id, user_id, text, None, Some(&dialogue), db).await
+}
 
-    // Check if user wants to cancel
-    if text == "назад" || text == "Назад" || text == "/cancel" {
-        dialogue.update(AppState::Idle).await?;
-        bot.send_message(chat_id, "Отменено.").await?;
+/// Handle text in AwaitingSubDeleteNum state through transport abstraction.
+pub async fn handle_sub_delete_num_transport<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_sub_delete_num_core(transport, peer_id, user_id, text, Some(store), None, db).await
+}
+
+/// Временный Telegram entrypoint до переключения app/router на VK.
+pub async fn handle_sub_delete_num(
+    bot: Bot,
+    msg: Message,
+    dialogue: AppDialogue,
+    db: Db,
+) -> HandlerResult {
+    let text = msg.text().unwrap_or("");
+    let peer_id = msg.chat.id.0;
+    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let transport = TelegramTransport::new(bot);
+
+    handle_sub_delete_num_core(&transport, peer_id, user_id, text, None, Some(&dialogue), db).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_channel_url_core<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: Option<&DialogueStore>,
+    dialogue: Option<&AppDialogue>,
+    db: Db,
+) -> HandlerResult {
+    let text = text.trim();
+    if text.is_empty() {
+        transport
+            .send_text(peer_id, "Пожалуйста, отправь ссылку на канал Twitch или YouTube.")
+            .await?;
         return Ok(());
     }
 
-    // Try to parse the URL
+    if text.eq_ignore_ascii_case("назад") || text == "/cancel" {
+        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        transport.send_text(peer_id, "Отменено.").await?;
+        return Ok(());
+    }
+
     let parsed = match parse_channel_url(text) {
         Some(p) => p,
         None => {
-            bot.send_message(
-                chat_id,
+            send_html_text(
+                transport,
+                peer_id,
                 "❌ Не удалось распознать ссылку.\n\n\
                  Поддерживаемые форматы:\n\
                  • <code>https://twitch.tv/username</code>\n\
                  • <code>https://youtube.com/@handle</code>\n\
                  • <code>https://youtube.com/channel/UCxxxx</code>",
             )
-            .parse_mode(ParseMode::Html)
             .await?;
             return Ok(());
         }
     };
 
-    // Check if already subscribed
-    if db.is_channel_subscribed(user_id, parsed.platform, &parsed.channel_id).await? {
-        bot.send_message(
-            chat_id,
-            format!("⚠️ Ты уже подписан на <b>{}</b>", parsed.channel_name),
+    if db
+        .is_channel_subscribed(user_id, parsed.platform, &parsed.channel_id)
+        .await?
+    {
+        send_html_text(
+            transport,
+            peer_id,
+            &format!("⚠️ Ты уже подписан на <b>{}</b>", parsed.channel_name),
         )
-        .parse_mode(ParseMode::Html)
         .await?;
-        dialogue.update(AppState::Idle).await?;
+        update_state(store, dialogue, user_id, AppState::Idle).await?;
         return Ok(());
     }
 
-    // Add subscription
     let sub = db
         .add_channel_sub(
             user_id,
@@ -210,89 +268,71 @@ pub async fn handle_channel_url(
         Platform::Youtube => "🔴",
     };
 
-    bot.send_message(
-        chat_id,
-        format!(
+    send_html_text(
+        transport,
+        peer_id,
+        &format!(
             "✅ Подписка добавлена!\n\n\
              {} <b>{}</b> — <a href=\"{}\">{}</a>\n\n\
              Я буду уведомлять тебя о новых видео и трансляциях.",
-            icon,
-            sub.platform,
-            sub.url,
-            sub.channel_name
+            icon, sub.platform, sub.url, sub.channel_name
         ),
     )
-    .parse_mode(ParseMode::Html)
     .await?;
 
-    dialogue.update(AppState::Idle).await?;
+    update_state(store, dialogue, user_id, AppState::Idle).await?;
     Ok(())
 }
 
-/// Handle text in AwaitingSubDeleteNum state - user sends subscription number to delete.
-pub async fn handle_sub_delete_num(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
+#[allow(clippy::too_many_arguments)]
+async fn handle_sub_delete_num_core<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    text: &str,
+    store: Option<&DialogueStore>,
+    dialogue: Option<&AppDialogue>,
     db: Db,
 ) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let user_id = chat_id.0;
-
-    let text = match msg.text() {
-        Some(t) => t.trim(),
-        None => {
-            bot.send_message(chat_id, "Введи номер подписки для удаления.")
-                .await?;
-            return Ok(());
-        }
-    };
-
-    // Check if user wants to cancel
-    if text == "назад" || text == "Назад" || text == "/cancel" {
-        dialogue.update(AppState::Idle).await?;
-        let subs = db.get_user_channel_subs(user_id).await?;
-        let msg_text = format_subs_message(&subs);
-        let keyboard = channel_subs_keyboard();
-        bot.send_message(chat_id, msg_text)
-            .parse_mode(ParseMode::Html)
-            .reply_markup(keyboard)
+    let text = text.trim();
+    if text.is_empty() {
+        transport
+            .send_text(peer_id, "Введи номер подписки для удаления.")
             .await?;
         return Ok(());
     }
 
-    // Parse number
+    if text.eq_ignore_ascii_case("назад") || text == "/cancel" {
+        update_state(store, dialogue, user_id, AppState::Idle).await?;
+        send_subs_list(transport, peer_id, user_id, db).await?;
+        return Ok(());
+    }
+
     let num: i32 = match text.parse() {
         Ok(n) => n,
         Err(_) => {
-            bot.send_message(chat_id, "❌ Введи номер подписки (число).")
+            transport
+                .send_text(peer_id, "❌ Введи номер подписки (число).")
                 .await?;
             return Ok(());
         }
     };
 
-    // Try to delete
     let deleted = db.delete_channel_sub(user_id, num).await?;
 
     if deleted {
         info!(user_id = user_id, sub_num = num, "Deleted channel subscription");
-        bot.send_message(chat_id, format!("✅ Подписка #{} удалена.", num))
+        transport
+            .send_text(peer_id, &format!("✅ Подписка #{} удалена.", num))
             .await?;
     } else {
-        bot.send_message(chat_id, format!("❌ Подписка #{} не найдена.", num))
+        transport
+            .send_text(peer_id, &format!("❌ Подписка #{} не найдена.", num))
             .await?;
     }
 
-    dialogue.update(AppState::Idle).await?;
-
-    // Show updated list
-    let subs = db.get_user_channel_subs(user_id).await?;
-    let msg_text = format_subs_message(&subs);
-    let keyboard = channel_subs_keyboard();
-    bot.send_message(chat_id, msg_text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
-        .await?;
+    update_state(store, dialogue, user_id, AppState::Idle).await?;
+    send_subs_list(transport, peer_id, user_id, db).await?;
 
     Ok(())
 }
@@ -301,57 +341,145 @@ pub async fn handle_sub_delete_num(
 // Callback Handlers
 // ============================================================================
 
-/// Handle "delete subscription" callback.
+/// Handle "delete subscription" callback through transport abstraction.
+pub async fn handle_sub_delete_callback_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: &DialogueStore,
+    db: Db,
+) -> HandlerResult {
+    handle_sub_delete_callback_core(transport, event_id, user_id, peer_id, Some(store), None, db)
+        .await
+}
+
+/// Временный Telegram callback entrypoint до переключения app/router на VK.
 pub async fn handle_sub_delete_callback(
     bot: Bot,
     q: CallbackQuery,
     dialogue: AppDialogue,
     db: Db,
 ) -> HandlerResult {
-    bot.answer_callback_query(q.id.clone()).await?;
-
-    let chat_id = match q.message {
-        Some(ref m) => m.chat().id,
+    let peer_id = match &q.message {
+        Some(msg) => msg.chat().id.0,
         None => return Ok(()),
     };
-    let user_id = chat_id.0;
+    let user_id = q.from.id.0 as i64;
+    let transport = TelegramTransport::new(bot);
 
-    // Check if user has any subscriptions
+    handle_sub_delete_callback_core(
+        &transport,
+        &q.id.0,
+        user_id,
+        peer_id,
+        None,
+        Some(&dialogue),
+        db,
+    )
+    .await
+}
+
+/// Handle "subs" callback through transport abstraction.
+pub async fn handle_subs_callback_transport<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    db: Db,
+) -> HandlerResult {
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+    send_subs_list(transport, peer_id, user_id, db).await
+}
+
+/// Временный Telegram callback entrypoint до переключения app/router на VK.
+pub async fn handle_subs_callback(bot: Bot, q: CallbackQuery, db: Db) -> HandlerResult {
+    let peer_id = match &q.message {
+        Some(msg) => msg.chat().id.0,
+        None => return Ok(()),
+    };
+    let user_id = q.from.id.0 as i64;
+    let transport = TelegramTransport::new(bot);
+
+    handle_subs_callback_transport(&transport, &q.id.0, user_id, peer_id, db).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_sub_delete_callback_core<T: BotTransport>(
+    transport: &T,
+    event_id: &str,
+    user_id: i64,
+    peer_id: i64,
+    store: Option<&DialogueStore>,
+    dialogue: Option<&AppDialogue>,
+    db: Db,
+) -> HandlerResult {
+    transport
+        .answer_callback(event_id, user_id, peer_id, None)
+        .await?;
+
     let count = db.count_user_channel_subs(user_id).await?;
     if count == 0 {
-        bot.send_message(chat_id, "У тебя пока нет подписок для удаления.")
+        transport
+            .send_text(peer_id, "У тебя пока нет подписок для удаления.")
             .await?;
         return Ok(());
     }
 
-    dialogue.update(AppState::AwaitingSubDeleteNum).await?;
-
-    bot.send_message(
-        chat_id,
-        "Введи номер подписки для удаления (или напиши «назад» для отмены):",
-    )
-    .await?;
+    update_state(store, dialogue, user_id, AppState::AwaitingSubDeleteNum).await?;
+    transport
+        .send_text(
+            peer_id,
+            "Введи номер подписки для удаления (или напиши «назад» для отмены):",
+        )
+        .await?;
 
     Ok(())
 }
 
-/// Handle "subs" callback (from notification buttons).
-pub async fn handle_subs_callback(bot: Bot, q: CallbackQuery, db: Db) -> HandlerResult {
-    bot.answer_callback_query(q.id.clone()).await?;
-
-    let chat_id = match q.message {
-        Some(ref m) => m.chat().id,
-        None => return Ok(()),
-    };
-
-    let subs = db.get_user_channel_subs(chat_id.0).await?;
+async fn send_subs_list<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    user_id: i64,
+    db: Db,
+) -> HandlerResult {
+    let subs = db.get_user_channel_subs(user_id).await?;
     let text = format_subs_message(&subs);
     let keyboard = channel_subs_keyboard();
 
-    bot.send_message(chat_id, text)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
-        .await?;
+    send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
+}
 
+async fn update_state(
+    store: Option<&DialogueStore>,
+    dialogue: Option<&AppDialogue>,
+    user_id: i64,
+    state: AppState,
+) -> HandlerResult {
+    if let Some(store) = store {
+        store.update(user_id, state);
+    } else if let Some(dialogue) = dialogue {
+        dialogue.update(state).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_text(peer_id, &text).await?;
+    Ok(())
+}
+
+async fn send_html_with_keyboard<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    text: &str,
+    keyboard: &TransportKeyboard,
+) -> HandlerResult {
+    let text = strip_html(text);
+    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
     Ok(())
 }

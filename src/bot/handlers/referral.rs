@@ -1,48 +1,49 @@
 //! Обработчики реферальной программы.
 
 use teloxide::prelude::*;
-use teloxide::types::{Message, ParseMode};
+use teloxide::types::Message;
 
 use crate::api::db::Db;
 use crate::bot::keyboards::profile_back_keyboard;
 use crate::bot::router::HandlerResult;
+use crate::transport::adapters::TelegramTransport;
+use crate::transport::traits::{BotTransport, TransportKeyboard};
 
-/// Обработчик команды /ref.
-pub async fn command_ref(bot: Bot, msg: Message, db: Db) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let user_id = chat_id.0;
+const REFERRAL_UNAVAILABLE: &str = "Реферальная программа временно недоступна";
 
-    send_referral_message(&bot, chat_id, user_id, &db).await
+/// Обработчик команды /ref через абстрактный транспорт.
+pub async fn command_ref_transport<T: BotTransport>(transport: &T, peer_id: i64) -> HandlerResult {
+    send_unavailable(transport, peer_id).await
 }
 
-/// Отправляет сообщение с реферальной ссылкой.
-pub async fn send_referral_message(bot: &Bot, chat_id: ChatId, user_id: i64, db: &Db) -> HandlerResult {
-    // Получаем имя бота
-    let bot_username = match bot.get_me().await {
-        Ok(me) => me.username.clone().unwrap_or_else(|| "yanapomnyu_bot".to_string()),
-        Err(_) => std::env::var("BOT_USERNAME").unwrap_or_else(|_| "yanapomnyu_bot".to_string()),
-    };
+/// Временный Telegram entrypoint до переключения app/router на VK.
+pub async fn command_ref(bot: Bot, msg: Message, _db: Db) -> HandlerResult {
+    let transport = TelegramTransport::new(bot);
+    send_unavailable(&transport, msg.chat.id.0).await
+}
 
-    // Считаем приглашённых друзей
-    let invited_count = db.count_referrals_by_referrer(user_id).await.unwrap_or(0);
+/// Отправляет сообщение о временной недоступности реферальной программы.
+pub async fn send_referral_message<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    _user_id: i64,
+    _db: &Db,
+) -> HandlerResult {
+    send_unavailable(transport, peer_id).await
+}
 
-    // Формируем реферальную ссылку с deep link
-    let referral_link = format!("https://t.me/{}?start=ref_{}", bot_username, user_id);
+async fn send_unavailable<T: BotTransport>(transport: &T, peer_id: i64) -> HandlerResult {
+    // TODO(vk-migration): реферальные ссылки VK
+    let keyboard = profile_back_keyboard();
+    send_with_keyboard(transport, peer_id, REFERRAL_UNAVAILABLE, &keyboard).await
+}
 
-    let message = format!(
-        "<b>Ваша ссылка для друзей</b>:\n\
-         {}\n\n\
-         Если человек, приглашенный по вашей реферальной ссылке, оформит подписку, \
-         то вы получите <b>1 месяц подписки бесплатно</b>.\n\n\
-         Вы пригласили друзей: <b>{}</b>",
-        referral_link,
-        invited_count
-    );
-
-    bot.send_message(chat_id, message)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(profile_back_keyboard())
-        .await?;
-
+async fn send_with_keyboard<T: BotTransport>(
+    transport: &T,
+    peer_id: i64,
+    text: &str,
+    keyboard: &TransportKeyboard,
+) -> HandlerResult {
+    transport.send_with_keyboard(peer_id, text, keyboard).await?;
     Ok(())
 }

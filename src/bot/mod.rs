@@ -6,7 +6,6 @@
 //! - [`states`] - FSM состояния диалога (AppState)
 //! - [`handlers`] - Обработчики сообщений и callbacks
 //! - [`keyboards`] - Inline клавиатуры
-//! - [`filters`] - Фильтры для handlers
 //!
 //! ## Flow обработки сообщений
 //!
@@ -26,7 +25,6 @@
 //!         └─► handlers::callbacks → reminder/pay
 //! ```
 
-pub mod filters;
 pub mod handlers;
 pub mod keyboards;
 pub mod router;
