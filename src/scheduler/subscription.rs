@@ -25,11 +25,11 @@
 
 use std::time::Duration;
 
-use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use tracing::{debug, error, info, warn};
 
 use crate::api::db::Db;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::BotTransport;
 
 // ============================================================================
 // Конфигурация
@@ -50,10 +50,13 @@ const EXPIRY_WARNING_DAYS: i32 = 7;
 /// Проверяет подписки каждый час:
 /// - Отправляет предупреждения за 7 дней до истечения
 /// - Удаляет напоминания при истечении подписки
-pub fn start_subscription_scheduler(bot: Bot, db: Db) {
+pub fn start_subscription_scheduler<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     tokio::spawn(async move {
         info!("Starting subscription scheduler");
-        subscription_loop(bot, db).await;
+        subscription_loop(transport, db).await;
     });
 }
 
@@ -61,19 +64,22 @@ pub fn start_subscription_scheduler(bot: Bot, db: Db) {
 // Основной цикл
 // ============================================================================
 
-async fn subscription_loop(bot: Bot, db: Db) {
+async fn subscription_loop<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     let mut interval = tokio::time::interval(Duration::from_secs(SUBSCRIPTION_CHECK_INTERVAL_SECS));
 
     loop {
         interval.tick().await;
 
         // 1. Проверяем подписки, истекающие через 7 дней
-        if let Err(e) = check_expiring_subscriptions(&bot, &db).await {
+        if let Err(e) = check_expiring_subscriptions(&transport, &db).await {
             error!("Error checking expiring subscriptions: {}", e);
         }
 
         // 2. Обрабатываем истёкшие подписки
-        if let Err(e) = process_expired_subscriptions(&bot, &db).await {
+        if let Err(e) = process_expired_subscriptions(&transport, &db).await {
             error!("Error processing expired subscriptions: {}", e);
         }
     }
@@ -84,15 +90,23 @@ async fn subscription_loop(bot: Bot, db: Db) {
 // ============================================================================
 
 /// Находит пользователей с истекающими подписками и отправляет предупреждения.
-async fn check_expiring_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()> {
-    let expiring_users = db.get_users_with_expiring_subscriptions(EXPIRY_WARNING_DAYS).await?;
+async fn check_expiring_subscriptions(
+    transport: &impl BotTransport,
+    db: &Db,
+) -> anyhow::Result<()> {
+    let expiring_users = db
+        .get_users_with_expiring_subscriptions(EXPIRY_WARNING_DAYS)
+        .await?;
 
     if expiring_users.is_empty() {
         debug!("No users with expiring subscriptions");
         return Ok(());
     }
 
-    info!("Found {} users with expiring subscriptions", expiring_users.len());
+    info!(
+        "Found {} users with expiring subscriptions",
+        expiring_users.len()
+    );
 
     for record in expiring_users {
         // Подсчитываем количество напоминаний у пользователя
@@ -102,25 +116,32 @@ async fn check_expiring_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()> 
         let warning_message = format_expiry_warning(&record.expiry_formatted(), reminder_count);
 
         // Отправляем предупреждение
-        match bot
-            .send_message(ChatId(record.chat_id), &warning_message)
-            .parse_mode(ParseMode::Html)
-            .await
-        {
-            Ok(_) => {
+        let warning_message = strip_html(&warning_message);
+
+        match transport.send_text(record.chat_id, &warning_message).await {
+            Ok(()) => {
                 info!("Sent expiry warning to user {}", record.chat_id);
                 // Помечаем, что предупреждение отправлено
                 if let Err(e) = db.mark_subscription_warning_sent(record.chat_id).await {
-                    warn!("Failed to mark warning sent for user {}: {}", record.chat_id, e);
+                    warn!(
+                        "Failed to mark warning sent for user {}: {}",
+                        record.chat_id, e
+                    );
                 }
             }
             Err(e) => {
                 // Если пользователь заблокировал бота - всё равно помечаем
                 if is_user_blocked_error(&e.to_string()) {
-                    warn!("User {} blocked bot, marking warning as sent", record.chat_id);
+                    warn!(
+                        "User {} blocked bot, marking warning as sent",
+                        record.chat_id
+                    );
                     let _ = db.mark_subscription_warning_sent(record.chat_id).await;
                 } else {
-                    warn!("Failed to send expiry warning to user {}: {}", record.chat_id, e);
+                    warn!(
+                        "Failed to send expiry warning to user {}: {}",
+                        record.chat_id, e
+                    );
                 }
             }
         }
@@ -134,7 +155,10 @@ async fn check_expiring_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()> 
 // ============================================================================
 
 /// Находит пользователей с истёкшими подписками и удаляет их напоминания.
-async fn process_expired_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()> {
+async fn process_expired_subscriptions(
+    transport: &impl BotTransport,
+    db: &Db,
+) -> anyhow::Result<()> {
     let expired_users = db.get_expired_subscriptions().await?;
 
     if expired_users.is_empty() {
@@ -142,7 +166,10 @@ async fn process_expired_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()>
         return Ok(());
     }
 
-    info!("Found {} users with expired subscriptions", expired_users.len());
+    info!(
+        "Found {} users with expired subscriptions",
+        expired_users.len()
+    );
 
     for record in expired_users {
         // Подсчитываем количество напоминаний перед удалением
@@ -165,17 +192,18 @@ async fn process_expired_subscriptions(bot: &Bot, db: &Db) -> anyhow::Result<()>
         // Отправляем уведомление об удалении
         let deletion_message = format_deletion_notice(deleted_count);
 
-        match bot
-            .send_message(ChatId(record.chat_id), &deletion_message)
-            .parse_mode(ParseMode::Html)
-            .await
-        {
-            Ok(_) => {
+        let deletion_message = strip_html(&deletion_message);
+
+        match transport.send_text(record.chat_id, &deletion_message).await {
+            Ok(()) => {
                 info!("Sent deletion notice to user {}", record.chat_id);
             }
             Err(e) => {
                 // Не критично если не удалось отправить уведомление
-                warn!("Failed to send deletion notice to user {}: {}", record.chat_id, e);
+                warn!(
+                    "Failed to send deletion notice to user {}: {}",
+                    record.chat_id, e
+                );
             }
         }
     }
@@ -204,15 +232,14 @@ fn format_expiry_warning(expiry_date: &str, reminder_count: i64) -> String {
         Ваша подписка истекает <b>{}</b>.{}\n\n\
         Чтобы сохранить доступ к созданию напоминаний и не потерять существующие, \
         продлите подписку командой /pay",
-        expiry_date,
-        reminder_text
+        expiry_date, reminder_text
     )
 }
 
 /// Форматирует сообщение об удалении напоминаний.
 fn format_deletion_notice(deleted_count: i64) -> String {
     let word = pluralize_reminders(deleted_count);
-    
+
     format!(
         "❌ <b>Подписка истекла</b>\n\n\
         Ваша подписка закончилась. <b>{}</b> {} было удалено.\n\n\
@@ -228,11 +255,11 @@ fn pluralize_reminders(count: i64) -> &'static str {
     let last_two = abs % 100;
     let last_one = abs % 10;
 
-    if last_two >= 11 && last_two <= 19 {
+    if (11..=19).contains(&last_two) {
         "напоминаний"
     } else if last_one == 1 {
         "напоминание"
-    } else if last_one >= 2 && last_one <= 4 {
+    } else if (2..=4).contains(&last_one) {
         "напоминания"
     } else {
         "напоминаний"

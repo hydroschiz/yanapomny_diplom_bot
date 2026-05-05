@@ -73,12 +73,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use futures::stream::{self, StreamExt};
-use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::api::db::{Db, Reminder, User};
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::BotTransport;
 use crate::utils::timezone::user_local_time;
 
 // ============================================================================
@@ -116,12 +116,15 @@ const MAX_RETRIES: i32 = 3;
 ///
 /// # Аргументы
 ///
-/// * `bot` - Telegram Bot для отправки сообщений
+/// * `transport` - транспорт для отправки сообщений
 /// * `db` - Подключение к MongoDB
-pub fn start_scheduler(bot: Bot, db: Db) {
+pub fn start_scheduler<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     tokio::spawn(async move {
         info!("Starting reminder scheduler");
-        
+
         // Восстанавливаем напоминания, которые были в processing при крахе
         // Это может произойти если бот упал во время отправки
         if let Ok(recovered) = db.recover_stuck_reminders(300).await {
@@ -129,9 +132,9 @@ pub fn start_scheduler(bot: Bot, db: Db) {
                 info!("Recovered {} stuck reminders", recovered);
             }
         }
-        
+
         // Запускаем бесконечный цикл обработки
-        scheduler_loop(bot, db).await;
+        scheduler_loop(transport, db).await;
     });
 }
 
@@ -145,19 +148,22 @@ pub fn start_scheduler(bot: Bot, db: Db) {
 /// 1. Захватывает batch напоминаний
 /// 2. Отправляет их параллельно
 /// 3. Обновляет статусы в базе
-async fn scheduler_loop(bot: Bot, db: Db) {
+async fn scheduler_loop<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     // interval.tick() срабатывает сразу, затем каждые N секунд
     let mut interval = tokio::time::interval(Duration::from_secs(SCHEDULER_INTERVAL_SECS));
-    
+
     // Semaphore ограничивает количество одновременных отправок
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS));
 
     loop {
         // Ждём следующего тика (или выполняем сразу при первом вызове)
         interval.tick().await;
-        
+
         // Обрабатываем due напоминания
-        if let Err(e) = process_due_reminders(&bot, &db, semaphore.clone()).await {
+        if let Err(e) = process_due_reminders(&transport, &db, semaphore.clone()).await {
             error!("Scheduler error: {}", e);
         }
     }
@@ -170,14 +176,14 @@ async fn scheduler_loop(bot: Bot, db: Db) {
 /// 1. `claim_due_reminders` - атомарно забирает batch напоминаний
 /// 2. `buffer_unordered` - параллельно отправляет с ограничением concurrency
 /// 3. Логирует результаты
-async fn process_due_reminders(
-    bot: &Bot, 
-    db: &Db, 
-    semaphore: Arc<Semaphore>
+async fn process_due_reminders<T: BotTransport>(
+    transport: &T,
+    db: &Db,
+    semaphore: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     // Атомарно захватываем batch напоминаний (status → processing)
     let claimed_reminders = db.claim_due_reminders(BATCH_SIZE).await?;
-    
+
     // Если нет due напоминаний - выходим
     if claimed_reminders.is_empty() {
         return Ok(());
@@ -190,30 +196,32 @@ async fn process_due_reminders(
     let results: Vec<_> = stream::iter(claimed_reminders)
         .map(|reminder| {
             // Клонируем для перемещения в async block
-            let bot = bot.clone();
+            let transport = (*transport).clone();
             let db = db.clone();
             let sem = semaphore.clone();
-            
+
             async move {
                 // Получаем permit от semaphore (ждём если достигнут лимит)
                 let _permit = sem.acquire().await.unwrap();
                 // Отправляем напоминание
-                send_reminder(&bot, &db, reminder).await
+                send_reminder(&transport, &db, reminder).await
             }
         })
-        .buffer_unordered(MAX_CONCURRENT_SENDS)  // Параллельное выполнение
+        .buffer_unordered(MAX_CONCURRENT_SENDS) // Параллельное выполнение
         .collect()
         .await;
 
     // Подсчитываем результаты для логирования
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     let error_count = results.iter().filter(|r| r.is_err()).count();
-    
+
     if error_count > 0 {
-        warn!("Sent {}/{} reminders ({} errors)", 
-              success_count, 
-              success_count + error_count,
-              error_count);
+        warn!(
+            "Sent {}/{} reminders ({} errors)",
+            success_count,
+            success_count + error_count,
+            error_count
+        );
     } else if success_count > 0 {
         debug!("Sent {} reminders successfully", success_count);
     }
@@ -222,8 +230,16 @@ async fn process_due_reminders(
 }
 
 /// Test-oriented entry point for deterministic due reminder processing.
-pub async fn process_due_reminders_once(bot: &Bot, db: &Db) -> anyhow::Result<()> {
-    process_due_reminders(bot, db, Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS))).await
+pub async fn process_due_reminders_once(
+    transport: &impl BotTransport,
+    db: &Db,
+) -> anyhow::Result<()> {
+    process_due_reminders(
+        transport,
+        db,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS)),
+    )
+    .await
 }
 
 // ============================================================================
@@ -240,15 +256,18 @@ pub async fn process_due_reminders_once(bot: &Bot, db: &Db) -> anyhow::Result<()
 /// | Permanent error | Помечаем sent (user blocked bot) |
 /// | Temp error, retry < max | Планируем retry |
 /// | Temp error, retry >= max | Помечаем failed |
-async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result<()> {
+async fn send_reminder(
+    transport: &impl BotTransport,
+    db: &Db,
+    reminder: Reminder,
+) -> anyhow::Result<()> {
     use crate::bot::keyboards::reminder_snooze_keyboard;
 
-    let chat_id = ChatId(reminder.chat_id);
     let rem_id = reminder.rem_id.unwrap_or(0);
 
     // Получаем настройки пользователя для кнопок откладывания
     let user = db.ensure_user(reminder.chat_id).await?;
-    
+
     // Форматируем время в часовом поясе пользователя
     let time_display = format_reminder_time_for_user(&reminder.time, &user);
 
@@ -264,36 +283,41 @@ async fn send_reminder(bot: &Bot, db: &Db, reminder: Reminder) -> anyhow::Result
     // Создаём клавиатуру с кнопками откладывания
     let keyboard = reminder_snooze_keyboard(rem_id, &user.snooze_buttons);
 
-    // Отправляем через Telegram API
-    match bot.send_message(chat_id, &message)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
-        .await 
+    let message = strip_html(&message);
+
+    match transport
+        .send_with_keyboard(reminder.chat_id, &message, &keyboard)
+        .await
     {
-        Ok(_sent_msg) => {
+        Ok(()) => {
             debug!("Sent reminder #{} to user {}", rem_id, reminder.chat_id);
             // Обрабатываем успешную отправку
             handle_successful_send(db, &reminder).await?;
         }
         Err(e) => {
             let error_str = e.to_string();
-            
+
             // Проверяем, является ли ошибка постоянной (retry бессмысленен)
             if is_permanent_error(&error_str) {
                 warn!("Permanent failure for reminder #{}: {}", rem_id, error_str);
                 // Помечаем как failed чтобы не пытаться снова и сохранить статус ошибки
                 db.mark_reminder_failed(rem_id).await?;
-            } 
+            }
             // Проверяем, можно ли ещё делать retry
             else if reminder.retry_count < MAX_RETRIES {
-                warn!("Temporary failure for reminder #{}, scheduling retry: {}", 
-                      rem_id, error_str);
+                warn!(
+                    "Temporary failure for reminder #{}, scheduling retry: {}",
+                    rem_id, error_str
+                );
                 // Планируем retry с exponential backoff
                 db.schedule_retry(rem_id, reminder.retry_count).await?;
-            } 
+            }
             // Превышено максимальное количество retry
             else {
-                error!("Max retries exceeded for reminder #{}, marking as failed", rem_id);
+                error!(
+                    "Max retries exceeded for reminder #{}, marking as failed",
+                    rem_id
+                );
                 db.mark_reminder_failed(rem_id).await?;
             }
         }
@@ -310,10 +334,10 @@ fn format_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
     // Парсим смещение пользователя
     let offset_secs = parse_utc_offset(utc_offset).unwrap_or(0);
     let offset = FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap());
-    
+
     // Конвертируем в локальное время пользователя
     let local_time = time.with_timezone(&offset);
-    
+
     // Названия дней недели на русском
     let weekday = match local_time.weekday() {
         chrono::Weekday::Mon => "понедельник",
@@ -324,7 +348,7 @@ fn format_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
         chrono::Weekday::Sat => "суббота",
         chrono::Weekday::Sun => "воскресенье",
     };
-    
+
     format!(
         "{:02}.{:02} ({}, {:02}:{:02})",
         local_time.day(),
@@ -366,7 +390,7 @@ pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> Stri
     let offset_secs = parse_utc_offset(utc_offset).unwrap_or(0);
     let offset = FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap());
     let local_time = time.with_timezone(&offset);
-    
+
     let month_name = match local_time.month() {
         1 => "ЯНВАРЬ",
         2 => "ФЕВРАЛЬ",
@@ -382,7 +406,7 @@ pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> Stri
         12 => "ДЕКАБРЬ",
         _ => "???",
     };
-    
+
     let weekday = match local_time.weekday() {
         chrono::Weekday::Mon => "понедельник",
         chrono::Weekday::Tue => "вторник",
@@ -392,7 +416,7 @@ pub fn format_full_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> Stri
         chrono::Weekday::Sat => "суббота",
         chrono::Weekday::Sun => "воскресенье",
     };
-    
+
     format!(
         "{} {}г. <b>{:02}.{:02} ({}, {:02}:{:02})</b>",
         month_name,
@@ -451,22 +475,22 @@ fn parse_utc_offset(utc_str: &str) -> Option<i32> {
     if utc_str == "nil" || utc_str.is_empty() {
         return Some(0);
     }
-    
+
     // Format: "+3:00" or "-5:30" or "7" or "+7"
     let s = utc_str.trim();
-    
-    let (sign, rest) = if s.starts_with('-') {
-        (-1, &s[1..])
-    } else if s.starts_with('+') {
-        (1, &s[1..])
+
+    let (sign, rest) = if let Some(rest) = s.strip_prefix('-') {
+        (-1, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (1, rest)
     } else {
         (1, s)
     };
-    
+
     let parts: Vec<&str> = rest.split(':').collect();
     let hours: i32 = parts.first()?.parse().ok()?;
     let minutes: i32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
-    
+
     Some(sign * (hours * 3600 + minutes * 60))
 }
 
@@ -476,7 +500,7 @@ fn parse_utc_offset(utc_str: &str) -> Option<i32> {
 /// Для разовых - помечает как отправленное.
 async fn handle_successful_send(db: &Db, reminder: &Reminder) -> anyhow::Result<()> {
     let rem_id = reminder.rem_id.unwrap_or(0);
-    
+
     // Проверяем, является ли напоминание повторяющимся
     if !reminder.delay.is_empty() {
         // Повторяющееся напоминание - вычисляем следующее время
@@ -492,7 +516,7 @@ async fn handle_successful_send(db: &Db, reminder: &Reminder) -> anyhow::Result<
         // Разовое напоминание - просто помечаем как отправленное
         db.mark_reminder_sent(rem_id).await?;
     }
-    
+
     Ok(())
 }
 
@@ -508,11 +532,11 @@ async fn handle_successful_send(db: &Db, reminder: &Reminder) -> anyhow::Result<
 /// - Пользователь деактивирован
 /// - Бот был кикнут из группы
 fn is_permanent_error(error: &str) -> bool {
-    error.contains("blocked") || 
-    error.contains("chat not found") ||
-    error.contains("user is deactivated") ||
-    error.contains("bot was kicked") ||
-    error.contains("have no rights")
+    error.contains("blocked")
+        || error.contains("chat not found")
+        || error.contains("user is deactivated")
+        || error.contains("bot was kicked")
+        || error.contains("have no rights")
 }
 
 /// Вычисляет следующее время для повторяющегося напоминания.
@@ -541,25 +565,25 @@ fn calculate_next_from_delay(
         "week" => current_time + Duration::weeks(1),
         "month" => add_months(current_time, 1),
         "year" => add_months(current_time, 12),
-        
+
         // По будням - ищем следующий рабочий день
         "weekday" => {
             let mut next = current_time + Duration::days(1);
             while !is_weekday(next.weekday()) {
-                next = next + Duration::days(1);
+                next += Duration::days(1);
             }
             next
         }
-        
+
         // По выходным - ищем следующий выходной
         "weekend" => {
             let mut next = current_time + Duration::days(1);
             while !is_weekend(next.weekday()) {
-                next = next + Duration::days(1);
+                next += Duration::days(1);
             }
             next
         }
-        
+
         // Неизвестный формат
         _ => return None,
     };
@@ -598,7 +622,7 @@ fn add_months(dt: chrono::DateTime<Utc>, months: i32) -> chrono::DateTime<Utc> {
 /// Возвращает количество дней в месяце.
 fn days_in_month(year: i32, month: u32) -> u32 {
     use chrono::NaiveDate;
-    
+
     // Вычисляем как разницу между первыми днями текущего и следующего месяца
     if month == 12 {
         NaiveDate::from_ymd_opt(year + 1, 1, 1)

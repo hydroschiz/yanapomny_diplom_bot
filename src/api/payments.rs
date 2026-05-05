@@ -4,40 +4,47 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::{
-    Json, Router,
-    extract::State,
-    response::IntoResponse,
-    routing::post,
-};
+use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use chrono::Utc;
 use serde_json::json;
-use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use tracing::{debug, info, warn};
 use yookassa::models::receipt::{Receipt, ReceiptCustomer, ReceiptItem};
 use yookassa::{
-    PaymentsApi, YooKassa,
     api::webhooks::{WebhookEvent, WebhookNotification},
-    models::{CreatePaymentRequest, Payment, common::IdempotenceKey},
+    models::{common::IdempotenceKey, CreatePaymentRequest, Payment},
+    PaymentsApi, YooKassa,
 };
 
 use crate::api::cache::{PendingCache, PendingPayment};
 use crate::api::db::{Db, PaymentTransaction};
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::BotTransport;
 
 /// Tariff definition.
 #[derive(Debug, Clone, Copy)]
 pub struct Tariff {
     pub months: i32,
-    pub price: i32,         // in rubles
+    pub price: i32, // in rubles
     pub price_per_month: i32,
 }
 
 /// Available tariffs.
 pub const TARIFFS: &[Tariff] = &[
-    Tariff { months: 3, price: 195, price_per_month: 65 },
-    Tariff { months: 6, price: 360, price_per_month: 60 },
-    Tariff { months: 12, price: 660, price_per_month: 55 },
+    Tariff {
+        months: 3,
+        price: 195,
+        price_per_month: 65,
+    },
+    Tariff {
+        months: 6,
+        price: 360,
+        price_per_month: 60,
+    },
+    Tariff {
+        months: 12,
+        price: 660,
+        price_per_month: 55,
+    },
 ];
 
 /// Get tariff by months.
@@ -141,8 +148,8 @@ impl PaymentService {
         let tax_system_code: Option<u8> = std::env::var("YK_TAX_SYSTEM_CODE")
             .ok()
             .and_then(|s| s.parse::<u8>().ok());
-        let email_suffix =
-            std::env::var("YK_RECEIPT_EMAIL_SUFFIX").unwrap_or_else(|_| "yanapomnyu.ru".to_string());
+        let email_suffix = std::env::var("YK_RECEIPT_EMAIL_SUFFIX")
+            .unwrap_or_else(|_| "yanapomnyu.ru".to_string());
         let customer_email = format!("tg-{}@{}", user_id, email_suffix);
 
         let mut item = ReceiptItem::new(description.clone(), amount.clone(), "1.0", vat_code);
@@ -231,9 +238,9 @@ impl PaymentService {
     }
 
     /// Handle webhook from YooKassa.
-    pub async fn handle_webhook(
+    pub async fn handle_webhook<T: BotTransport>(
         &self,
-        bot: &Bot,
+        transport: &T,
         notification: WebhookNotification,
     ) -> anyhow::Result<()> {
         let event = notification.event;
@@ -269,19 +276,19 @@ impl PaymentService {
             })
             .map(|m| m as i32);
 
-        let _status_str = serde_json::to_value(&payment.status)?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
         let cache = self.require_cache()?;
 
         match event {
             WebhookEvent::PaymentSucceeded => {
                 if let Some(uid) = user_id {
                     // Deduplicate notifications
-                    if cache.notify_once(&payment.id, "succeeded").await.unwrap_or(true) {
-                        self.fulfill_payment(bot, &payment.id, uid, months.unwrap_or(3)).await?;
+                    if cache
+                        .notify_once(&payment.id, "succeeded")
+                        .await
+                        .unwrap_or(true)
+                    {
+                        self.fulfill_payment(transport, &payment.id, uid, months.unwrap_or(3))
+                            .await?;
                     }
                 } else {
                     warn!(payment_id = %payment.id, "user_id not found in metadata");
@@ -291,19 +298,25 @@ impl PaymentService {
             }
             WebhookEvent::PaymentCanceled => {
                 if let Some(uid) = user_id {
-                    if cache.notify_once(&payment.id, "canceled").await.unwrap_or(true) {
-                        let _ = bot
-                            .send_message(ChatId(uid), "❌ Оплата отменена.")
-                            .await;
+                    if cache
+                        .notify_once(&payment.id, "canceled")
+                        .await
+                        .unwrap_or(true)
+                    {
+                        let _ = transport.send_text(uid, "❌ Оплата отменена.").await;
                     }
                 }
                 let _ = cache.delete_by_payment(&payment.id).await;
             }
             WebhookEvent::PaymentWaitingForCapture => {
                 if let Some(uid) = user_id {
-                    if cache.notify_once(&payment.id, "waiting").await.unwrap_or(true) {
-                        let _ = bot
-                            .send_message(ChatId(uid), "⏳ Платёж ожидает подтверждения...")
+                    if cache
+                        .notify_once(&payment.id, "waiting")
+                        .await
+                        .unwrap_or(true)
+                    {
+                        let _ = transport
+                            .send_text(uid, "⏳ Платёж ожидает подтверждения...")
                             .await;
                     }
                 }
@@ -315,9 +328,9 @@ impl PaymentService {
     }
 
     /// Fulfill payment: extend subscription and notify user.
-    pub async fn fulfill_payment(
+    pub async fn fulfill_payment<T: BotTransport>(
         &self,
-        bot: &Bot,
+        transport: &T,
         payment_id: &str,
         user_id: i64,
         months: i32,
@@ -325,7 +338,11 @@ impl PaymentService {
         let cache = self.require_cache()?;
 
         // Try to acquire lock to prevent double-fulfillment
-        if !cache.try_acquire_fulfill_lock(payment_id).await.unwrap_or(true) {
+        if !cache
+            .try_acquire_fulfill_lock(payment_id)
+            .await
+            .unwrap_or(true)
+        {
             return Ok(());
         }
 
@@ -374,10 +391,8 @@ impl PaymentService {
             expiry_str
         );
 
-        let _ = bot
-            .send_message(ChatId(user_id), message)
-            .parse_mode(ParseMode::Html)
-            .await;
+        let message = strip_html(&message);
+        let _ = transport.send_text(user_id, &message).await;
 
         // Referral reward: if this user was invited and not yet rewarded, grant +1 month to referrer
         if let Ok(Some(referrer_id)) = self.db.consume_referral_reward(user_id).await {
@@ -391,11 +406,13 @@ impl PaymentService {
                          📅 Подписка активна до: <b>{}</b>",
                         referrer_expiry_str
                     );
-                    let _ = bot
-                        .send_message(ChatId(referrer_id), referrer_message)
-                        .parse_mode(ParseMode::Html)
-                        .await;
-                    info!(referrer_id = referrer_id, invited_id = user_id, "referral reward granted: +1 month");
+                    let referrer_message = strip_html(&referrer_message);
+                    let _ = transport.send_text(referrer_id, &referrer_message).await;
+                    info!(
+                        referrer_id = referrer_id,
+                        invited_id = user_id,
+                        "referral reward granted: +1 month"
+                    );
                 }
                 Err(e) => {
                     warn!(referrer_id = referrer_id, invited_id = user_id, error = %e, "failed to grant referral reward");
@@ -409,9 +426,9 @@ impl PaymentService {
     }
 
     /// Manual payment check (for "Проверить оплату" button).
-    pub async fn manual_check(
+    pub async fn manual_check<T: BotTransport>(
         &self,
-        bot: &Bot,
+        transport: &T,
         user_id: i64,
         payment_id: &str,
     ) -> anyhow::Result<String> {
@@ -419,7 +436,7 @@ impl PaymentService {
         let payment = self.require_yk_api()?.get(payment_id).await?;
         let cache = self.require_cache()?;
 
-        let status_str = serde_json::to_value(&payment.status)
+        let status_str = serde_json::to_value(payment.status)
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
@@ -428,14 +445,18 @@ impl PaymentService {
             .metadata
             .as_ref()
             .and_then(|m| m.get("months"))
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .map(|m| m as i32)
             .unwrap_or(3);
 
         match status_str.as_str() {
             "succeeded" => {
                 // Fulfill if not yet
-                self.fulfill_payment(bot, payment_id, user_id, months).await?;
+                self.fulfill_payment(transport, payment_id, user_id, months)
+                    .await?;
                 let _ = cache.delete_by_payment(payment_id).await;
                 Ok("✅ Платёж найден и подтверждён! Подписка активирована.".to_string())
             }
@@ -443,25 +464,27 @@ impl PaymentService {
                 let _ = cache.delete_by_payment(payment_id).await;
                 Ok("❌ Платёж отменён. Оформите новый платёж.".to_string())
             }
-            "pending" => {
-                Ok("⏳ Платёж в обработке. Подождите или попробуйте позже.".to_string())
-            }
-            other => {
-                Ok(format!("Статус платежа: {}. Подождите или попробуйте позже.", other))
-            }
+            "pending" => Ok("⏳ Платёж в обработке. Подождите или попробуйте позже.".to_string()),
+            other => Ok(format!(
+                "Статус платежа: {}. Подождите или попробуйте позже.",
+                other
+            )),
         }
     }
 
     /// Get pending payment for user.
-    pub async fn get_pending_payment(&self, user_id: i64) -> anyhow::Result<Option<PendingPayment>> {
+    pub async fn get_pending_payment(
+        &self,
+        user_id: i64,
+    ) -> anyhow::Result<Option<PendingPayment>> {
         self.require_cache()?.get_by_user(user_id).await
     }
 
     /// Build Axum router for webhooks.
-    pub fn router(self: Arc<Self>, bot: Bot) -> Router {
+    pub fn router<T: BotTransport>(self: Arc<Self>, transport: T) -> Router {
         let state = WebhookState {
             payment_svc: self,
-            bot,
+            transport,
         };
 
         Router::new()
@@ -471,18 +494,22 @@ impl PaymentService {
 }
 
 #[derive(Clone)]
-struct WebhookState {
+struct WebhookState<T: BotTransport> {
     payment_svc: Arc<PaymentService>,
-    bot: Bot,
+    transport: T,
 }
 
-async fn yookassa_webhook(
-    State(state): State<WebhookState>,
+async fn yookassa_webhook<T: BotTransport>(
+    State(state): State<WebhookState<T>>,
     Json(notification): Json<WebhookNotification>,
 ) -> impl IntoResponse {
     info!(event = ?notification.event, "YooKassa webhook received");
 
-    if let Err(e) = state.payment_svc.handle_webhook(&state.bot, notification).await {
+    if let Err(e) = state
+        .payment_svc
+        .handle_webhook(&state.transport, notification)
+        .await
+    {
         warn!(%e, "webhook handling error");
     }
 

@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
-use chrono::Utc;
 use teloxide::prelude::*;
 
-use crate::api::db::{Db, PaymentTransaction};
+use crate::api::db::Db;
 use crate::api::payments::{get_tariff, PaymentService};
 use crate::bot::keyboards::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
 use crate::bot::router::{AppDialogue, HandlerResult};
@@ -18,7 +16,11 @@ use crate::transport::traits::{BotTransport, TransportKeyboard};
 
 /// Format subscription status message.
 pub fn format_subscription_status(is_active: bool, expiry: Option<&str>) -> String {
-    let status = if is_active { "активна ✅" } else { "неактивна ❌" };
+    let status = if is_active {
+        "активна ✅"
+    } else {
+        "неактивна ❌"
+    };
     let expiry_line = if is_active {
         expiry
             .map(|e| format!("\n📅 <b>Действует до:</b> {}", e))
@@ -94,7 +96,11 @@ pub async fn command_pay(
     payment_svc: Arc<PaymentService>,
 ) -> HandlerResult {
     let peer_id = msg.chat.id.0;
-    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let user_id = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
     if !payment_svc.is_enabled() {
@@ -247,7 +253,13 @@ async fn handle_pay_callback_core<T: BotTransport>(
             let keyboard = pay_provider_keyboard(months);
             send_html_with_keyboard(transport, peer_id, &text, &keyboard).await?;
 
-            update_state(store, dialogue, user_id, AppState::AwaitingPayment { months }).await?;
+            update_state(
+                store,
+                dialogue,
+                user_id,
+                AppState::AwaitingPayment { months },
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -272,8 +284,13 @@ async fn handle_pay_callback_core<T: BotTransport>(
                     )
                     .await?;
 
-                    update_state(store, dialogue, user_id, AppState::AwaitingPayment { months })
-                        .await?;
+                    update_state(
+                        store,
+                        dialogue,
+                        user_id,
+                        AppState::AwaitingPayment { months },
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     tracing::error!(%e, "failed to create payment");
@@ -289,12 +306,20 @@ async fn handle_pay_callback_core<T: BotTransport>(
     if let Some(rest) = data.strip_prefix("pay_check:") {
         if rest.parse::<i32>().is_ok() {
             transport
-                .answer_callback(event_id, user_id, peer_id, Some("Проверяем статус платежа..."))
+                .answer_callback(
+                    event_id,
+                    user_id,
+                    peer_id,
+                    Some("Проверяем статус платежа..."),
+                )
                 .await?;
 
             match payment_svc.get_pending_payment(user_id).await {
                 Ok(Some(pending)) => {
-                    match manual_check_transport(&payment_svc, transport, user_id, &pending.payment_id).await {
+                    match payment_svc
+                        .manual_check(transport, user_id, &pending.payment_id)
+                        .await
+                    {
                         Ok(msg) => {
                             let is_success = msg.contains('✅');
                             transport.send_text(peer_id, &msg).await?;
@@ -305,14 +330,20 @@ async fn handle_pay_callback_core<T: BotTransport>(
                         Err(e) => {
                             tracing::error!(%e, "payment check failed");
                             transport
-                                .send_text(peer_id, "❌ Не удалось проверить платёж. Попробуйте позже.")
+                                .send_text(
+                                    peer_id,
+                                    "❌ Не удалось проверить платёж. Попробуйте позже.",
+                                )
                                 .await?;
                         }
                     }
                 }
                 Ok(None) => {
                     transport
-                        .send_text(peer_id, "Нет активных платежей для проверки. Оформите новый платёж.")
+                        .send_text(
+                            peer_id,
+                            "Нет активных платежей для проверки. Оформите новый платёж.",
+                        )
                         .await?;
                 }
                 Err(e) => {
@@ -325,127 +356,6 @@ async fn handle_pay_callback_core<T: BotTransport>(
             return Ok(());
         }
     }
-
-    Ok(())
-}
-
-async fn manual_check_transport<T: BotTransport>(
-    payment_svc: &PaymentService,
-    transport: &T,
-    user_id: i64,
-    payment_id: &str,
-) -> anyhow::Result<String> {
-    let payment = payment_svc
-        .yk_api
-        .as_ref()
-        .context("payment service is disabled")?
-        .get(payment_id)
-        .await?;
-    let cache = payment_svc.cache.as_ref().context("payment service is disabled")?;
-
-    let status_str = serde_json::to_value(payment.status)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    let months = payment
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("months"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        .map(|m| m as i32)
-        .unwrap_or(3);
-
-    match status_str.as_str() {
-        "succeeded" => {
-            fulfill_payment_transport(payment_svc, transport, payment_id, user_id, months).await?;
-            let _ = cache.delete_by_payment(payment_id).await;
-            Ok("✅ Платёж найден и подтверждён! Подписка активирована.".to_string())
-        }
-        "canceled" => {
-            let _ = cache.delete_by_payment(payment_id).await;
-            Ok("❌ Платёж отменён. Оформите новый платёж.".to_string())
-        }
-        "pending" => Ok("⏳ Платёж в обработке. Подождите или попробуйте позже.".to_string()),
-        other => Ok(format!(
-            "Статус платежа: {}. Подождите или попробуйте позже.",
-            other
-        )),
-    }
-}
-
-async fn fulfill_payment_transport<T: BotTransport>(
-    payment_svc: &PaymentService,
-    transport: &T,
-    payment_id: &str,
-    user_id: i64,
-    months: i32,
-) -> anyhow::Result<()> {
-    let cache = payment_svc.cache.as_ref().context("payment service is disabled")?;
-
-    if !cache.try_acquire_fulfill_lock(payment_id).await.unwrap_or(true) {
-        return Ok(());
-    }
-
-    if payment_svc.db.is_transaction_fulfilled(payment_id).await? {
-        let _ = cache.release_fulfill_lock(payment_id).await;
-        return Ok(());
-    }
-
-    let new_expiry = payment_svc.db.extend_subscription(user_id, months).await?;
-
-    if let Err(e) = payment_svc.db.reset_expiry_flags(user_id).await {
-        tracing::warn!(user_id = user_id, error = %e, "failed to reset expiry flags");
-    }
-
-    let tariff = get_tariff(months);
-    let tx = PaymentTransaction {
-        payment_id: payment_id.to_string(),
-        user_id,
-        amount: tariff.map(|t| t.price as f64).unwrap_or(0.0),
-        currency: "RUB".to_string(),
-        status: "succeeded".to_string(),
-        months: Some(months),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        fulfilled: Some(true),
-        fulfilled_at: Some(Utc::now()),
-        idempotence_key: None,
-        provider: Some("yookassa".to_string()),
-    };
-    let _ = payment_svc.db.save_transaction(&tx).await;
-    let _ = cache.release_fulfill_lock(payment_id).await;
-
-    let expiry_str = new_expiry.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-    let message = format!(
-        "🎉 <b>Спасибо за покупку подписки</b>!\n\n\
-         📧 <b>Статус</b>: активна\n\
-         📅 <b>Действует до</b>: {}\n\n\
-         Если что-то непонятно — воспользуйтесь командой: /help — полезная информация и поддержка 💬",
-        expiry_str
-    );
-    send_html_text(transport, user_id, &message).await?;
-
-    if let Ok(Some(referrer_id)) = payment_svc.db.consume_referral_reward(user_id).await {
-        match payment_svc.db.extend_subscription(referrer_id, 1).await {
-            Ok(referrer_expiry) => {
-                let referrer_expiry_str = referrer_expiry.format("%d.%m.%Y").to_string();
-                let referrer_message = format!(
-                    "🎁 <b>Бонус по реферальной программе!</b>\n\n\
-                     Ваш друг оформил подписку, и вы получили <b>+1 месяц</b> бесплатно!\n\n\
-                     📅 Подписка активна до: <b>{}</b>",
-                    referrer_expiry_str
-                );
-                send_html_text(transport, referrer_id, &referrer_message).await?;
-                tracing::info!(referrer_id = referrer_id, invited_id = user_id, "referral reward granted: +1 month");
-            }
-            Err(e) => {
-                tracing::warn!(referrer_id = referrer_id, invited_id = user_id, error = %e, "failed to grant referral reward");
-            }
-        }
-    }
-
-    tracing::info!(payment_id = %payment_id, user_id = user_id, months = months, "payment fulfilled");
 
     Ok(())
 }
@@ -478,6 +388,8 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }

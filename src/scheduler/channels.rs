@@ -25,12 +25,12 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::Deserialize;
-use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use tracing::{debug, error, info, warn};
 
 use crate::api::db::{Db, Platform};
 use crate::bot::keyboards::stream_notification_keyboard;
+use crate::transport::text_format::strip_html;
+use crate::transport::traits::BotTransport;
 
 // ============================================================================
 // Конфигурация
@@ -80,11 +80,14 @@ struct TwitchUser {
 // ============================================================================
 
 /// Запускает планировщик проверки каналов как фоновую задачу.
-pub fn start_channel_scheduler(bot: Bot, db: Db) {
+pub fn start_channel_scheduler<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     // Check if Twitch credentials are configured
     let twitch_client_id = std::env::var("TWITCH_CLIENT_ID").ok();
     let twitch_token = std::env::var("TWITCH_ACCESS_TOKEN").ok();
-    
+
     if twitch_client_id.is_none() || twitch_token.is_none() {
         warn!("Twitch API credentials not configured (TWITCH_CLIENT_ID, TWITCH_ACCESS_TOKEN). Channel scheduler disabled.");
         return;
@@ -92,7 +95,7 @@ pub fn start_channel_scheduler(bot: Bot, db: Db) {
 
     tokio::spawn(async move {
         info!("Starting channel scheduler");
-        channel_loop(bot, db).await;
+        channel_loop(transport, db).await;
     });
 }
 
@@ -100,7 +103,10 @@ pub fn start_channel_scheduler(bot: Bot, db: Db) {
 // Основной цикл
 // ============================================================================
 
-async fn channel_loop(bot: Bot, db: Db) {
+async fn channel_loop<T>(transport: T, db: Db)
+where
+    T: BotTransport,
+{
     let mut interval = tokio::time::interval(Duration::from_secs(CHANNEL_CHECK_INTERVAL_SECS));
     let client = Client::new();
 
@@ -108,7 +114,7 @@ async fn channel_loop(bot: Bot, db: Db) {
         interval.tick().await;
 
         // Check Twitch streams
-        if let Err(e) = check_twitch_streams(&bot, &db, &client).await {
+        if let Err(e) = check_twitch_streams(&transport, &db, &client).await {
             error!("Error checking Twitch streams: {}", e);
         }
 
@@ -123,7 +129,11 @@ async fn channel_loop(bot: Bot, db: Db) {
 // Twitch Stream Checking
 // ============================================================================
 
-async fn check_twitch_streams(bot: &Bot, db: &Db, client: &Client) -> anyhow::Result<()> {
+async fn check_twitch_streams(
+    transport: &impl BotTransport,
+    db: &Db,
+    client: &Client,
+) -> anyhow::Result<()> {
     let twitch_client_id = match std::env::var("TWITCH_CLIENT_ID") {
         Ok(id) => id,
         Err(_) => return Ok(()),
@@ -158,15 +168,15 @@ async fn check_twitch_streams(bot: &Bot, db: &Db, client: &Client) -> anyhow::Re
     // Build channel -> was_live map from DB
     let mut was_live: HashMap<String, bool> = HashMap::new();
     for sub in &twitch_subs {
-        was_live.entry(sub.channel_id.clone()).or_insert(sub.is_live);
+        was_live
+            .entry(sub.channel_id.clone())
+            .or_insert(sub.is_live);
     }
 
     // Query Twitch API for stream status (batch by 100)
     for chunk in unique_channels.chunks(100) {
-        let query_params: Vec<(&str, &str)> = chunk
-            .iter()
-            .map(|ch| ("user_login", ch.as_str()))
-            .collect();
+        let query_params: Vec<(&str, &str)> =
+            chunk.iter().map(|ch| ("user_login", ch.as_str())).collect();
 
         let response = client
             .get(TWITCH_STREAMS_URL)
@@ -184,7 +194,7 @@ async fn check_twitch_streams(bot: &Bot, db: &Db, client: &Client) -> anyhow::Re
         }
 
         let streams_response: TwitchStreamsResponse = response.json().await?;
-        
+
         // Create a map of currently live channels
         let live_now: HashMap<String, &TwitchStream> = streams_response
             .data
@@ -202,12 +212,14 @@ async fn check_twitch_streams(bot: &Bot, db: &Db, client: &Client) -> anyhow::Re
             if is_live_now && !was_live_before {
                 if let Some(stream) = live_now.get(&channel_lower) {
                     // Get all subscribers for this channel
-                    let subscribers = db.get_channel_subscribers(Platform::Twitch, channel_id).await?;
+                    let subscribers = db
+                        .get_channel_subscribers(Platform::Twitch, channel_id)
+                        .await?;
                     let subscribers_count = subscribers.len();
-                    
+
                     // Send notifications
                     for user_id in subscribers {
-                        send_stream_notification(bot, user_id, stream).await;
+                        send_stream_notification(transport, user_id, stream).await;
                     }
 
                     info!(
@@ -234,7 +246,11 @@ async fn check_twitch_streams(bot: &Bot, db: &Db, client: &Client) -> anyhow::Re
     Ok(())
 }
 
-async fn send_stream_notification(bot: &Bot, user_id: i64, stream: &TwitchStream) {
+async fn send_stream_notification(
+    transport: &impl BotTransport,
+    user_id: i64,
+    stream: &TwitchStream,
+) {
     let message = format!(
         "<b>{}</b> — начал трансляцию 🎮\n\n\
          <b>{}</b> — <b>{}</b>\n\
@@ -249,11 +265,10 @@ async fn send_stream_notification(bot: &Bot, user_id: i64, stream: &TwitchStream
     );
 
     let keyboard = stream_notification_keyboard();
+    let message = strip_html(&message);
 
-    if let Err(e) = bot
-        .send_message(ChatId(user_id), message)
-        .parse_mode(ParseMode::Html)
-        .reply_markup(keyboard)
+    if let Err(e) = transport
+        .send_with_keyboard(user_id, &message, &keyboard)
         .await
     {
         if is_user_blocked_error(&e.to_string()) {
