@@ -11,6 +11,8 @@ pub static OFFSETS: &[&str] = &[
     "+12:00",
 ];
 
+const UTC_KEYBOARD_PAGE_SIZE: usize = 7;
+
 /// Клавиатура главного меню настроек (/setup).
 ///
 /// Кнопки:
@@ -42,13 +44,26 @@ pub fn profile_back_keyboard() -> TransportKeyboard {
 
 /// Клавиатура выбора UTC смещения.
 ///
-/// Генерирует сетку кнопок с UTC смещениями (по 4 в ряд)
-/// и кнопку "Назад" для отмены.
-pub fn utc_keyboard() -> TransportKeyboard {
-    let mut rows: Vec<Vec<TransportButton>> = Vec::new();
+/// Количество страниц UTC-клавиатуры.
+pub fn utc_keyboard_page_count() -> usize {
+    OFFSETS.len().div_ceil(UTC_KEYBOARD_PAGE_SIZE)
+}
 
-    // Генерируем кнопки UTC смещений (по 4 в ряд)
-    for chunk in OFFSETS.chunks(4) {
+/// Генерирует первую страницу клавиатуры выбора UTC смещения.
+pub fn utc_keyboard() -> TransportKeyboard {
+    utc_keyboard_page(0)
+}
+
+/// Генерирует страницу клавиатуры выбора UTC смещения.
+pub fn utc_keyboard_page(page: usize) -> TransportKeyboard {
+    let mut rows: Vec<Vec<TransportButton>> = Vec::new();
+    let page_count = utc_keyboard_page_count();
+    let page = page % page_count;
+    let start = page * UTC_KEYBOARD_PAGE_SIZE;
+    let end = (start + UTC_KEYBOARD_PAGE_SIZE).min(OFFSETS.len());
+
+    // VK inline-клавиатура принимает не больше 10 кнопок суммарно.
+    for chunk in OFFSETS[start..end].chunks(4) {
         let row = chunk
             .iter()
             .map(|o| {
@@ -59,8 +74,48 @@ pub fn utc_keyboard() -> TransportKeyboard {
         rows.push(row);
     }
 
-    // Кнопка отмены
-    rows.push(vec![TransportButton::callback("⬅ Назад", "utc_cancel")]);
+    let previous_page = if page == 0 { page_count - 1 } else { page - 1 };
+    let next_page = (page + 1) % page_count;
+    rows.push(vec![
+        TransportButton::callback("⬅", format!("utc_page:{}", previous_page)),
+        TransportButton::callback("Назад", "utc_cancel"),
+        TransportButton::callback("➡", format!("utc_page:{}", next_page)),
+    ]);
 
     TransportKeyboard::new(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utc_keyboard_fits_vk_inline_limits() {
+        for page in 0..utc_keyboard_page_count() {
+            let keyboard = utc_keyboard_page(page);
+
+            assert!(keyboard.rows.len() <= 6);
+            assert!(keyboard.rows.iter().all(|row| row.len() <= 5));
+            assert!(keyboard.rows.iter().map(Vec::len).sum::<usize>() <= 10);
+        }
+    }
+
+    #[test]
+    fn utc_keyboard_pages_cover_all_offsets() {
+        let mut offsets = Vec::new();
+
+        for page in 0..utc_keyboard_page_count() {
+            for row in utc_keyboard_page(page).rows {
+                for button in row {
+                    if let TransportButton::Callback { data, .. } = button {
+                        if let Some(offset) = data.strip_prefix("utc_set:") {
+                            offsets.push(offset.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(offsets, OFFSETS);
+    }
 }

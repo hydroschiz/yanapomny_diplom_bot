@@ -210,7 +210,7 @@ fn create_link_button(
     label: &str,
     url: &str,
     payload: Option<serde_json::Value>,
-    color: ButtonColor,
+    _color: ButtonColor,
 ) -> vk_bot_api::keyboard::KeyboardButton {
     use vk_bot_api::keyboard::ButtonAction;
 
@@ -220,7 +220,7 @@ fn create_link_button(
             label: label.to_string(),
             payload,
         },
-        color: Some(color),
+        color: None,
     }
 }
 

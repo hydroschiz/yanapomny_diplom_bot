@@ -5,7 +5,7 @@ use teloxide::prelude::*;
 use crate::api::db::Db;
 use crate::api::payments::PaymentService;
 use crate::bot::{
-    keyboards::{back_keyboard, setup_keyboard},
+    keyboards::{back_keyboard, setup_keyboard, utc_keyboard_page, utc_keyboard_page_count},
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
@@ -93,6 +93,24 @@ pub async fn handle_callback(
         bot.send_message(chat_id, "Настройка часового пояса отменена.")
             .await?;
         return Ok(());
+    }
+
+    if let Some(rest) = data.strip_prefix("utc_page:") {
+        if let Ok(page) = rest.parse::<usize>() {
+            bot.answer_callback_query(cq.id).await?;
+            let page_count = utc_keyboard_page_count();
+            bot.send_message(
+                chat_id,
+                format!(
+                    "Выберите UTC смещение кнопкой или отправьте город/смещение текстом.\n\nСтраница {}/{}",
+                    page % page_count + 1,
+                    page_count
+                ),
+            )
+            .reply_markup(utc_keyboard_page(page))
+            .await?;
+            return Ok(());
+        }
     }
 
     if let Some(rest) = data.strip_prefix("utc_set:") {

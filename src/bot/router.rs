@@ -14,7 +14,9 @@ use vk_bot_api::models::{Event, Message as VkMessage, MessageEvent};
 
 use crate::api::db::Db;
 use crate::api::payments::PaymentService;
-use crate::bot::keyboards::{back_keyboard, setup_keyboard};
+use crate::bot::keyboards::{
+    back_keyboard, setup_keyboard, utc_keyboard_page, utc_keyboard_page_count,
+};
 use crate::bot::states::AppState;
 use crate::config::Config;
 use crate::transport::dialogue_store::DialogueStore;
@@ -379,6 +381,28 @@ impl<T: BotTransport> AppHandler<T> {
                 .send_text(peer_id, "Настройка часового пояса отменена.")
                 .await?;
             return Ok(());
+        }
+
+        if let Some(rest) = payload.strip_prefix("utc_page:") {
+            if let Ok(page) = rest.parse::<usize>() {
+                self.transport
+                    .answer_callback(event_id, user_id, peer_id, None)
+                    .await?;
+                let page_count = utc_keyboard_page_count();
+                let text = format!(
+                    "Выберите UTC смещение кнопкой или отправьте город/смещение текстом.\n\nСтраница {}/{}",
+                    page % page_count + 1,
+                    page_count
+                );
+                send_html_with_keyboard(
+                    &self.transport,
+                    peer_id,
+                    &text,
+                    &utc_keyboard_page(page),
+                )
+                .await?;
+                return Ok(());
+            }
         }
 
         if let Some(rest) = payload.strip_prefix("utc_set:") {

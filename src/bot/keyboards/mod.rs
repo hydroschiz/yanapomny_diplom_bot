@@ -14,7 +14,10 @@ pub mod reminder;
 
 // Re-exports для удобства использования
 pub use channels::{channel_subs_keyboard, stream_notification_keyboard};
-pub use common::{back_keyboard, profile_back_keyboard, setup_keyboard, utc_keyboard};
+pub use common::{
+    back_keyboard, profile_back_keyboard, setup_keyboard, utc_keyboard, utc_keyboard_page,
+    utc_keyboard_page_count,
+};
 pub use pay::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
 pub use profile::profile_keyboard;
 pub use reminder::{
