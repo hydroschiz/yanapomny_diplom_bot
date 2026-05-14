@@ -576,6 +576,11 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.2.0-rc.1"
+dependencies = [
+ "chrono",
+ "thiserror 1.0.69",
+ "uuid",
+]
 
 [[package]]
 name = "dotenvy"

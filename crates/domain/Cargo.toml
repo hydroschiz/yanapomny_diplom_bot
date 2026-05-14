@@ -5,3 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Pure domain model and business rules."
 publish = false
+
+[dependencies]
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
