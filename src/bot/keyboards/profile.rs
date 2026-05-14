@@ -20,8 +20,6 @@ pub fn profile_keyboard() -> TransportKeyboard {
             TransportButton::callback("📺 Уведомления", "profile_subs"),
             TransportButton::callback("👥 Рефералка", "profile_referral"),
         ],
-        vec![
-            TransportButton::callback("💎 Подписка", "profile_pay"),
-        ],
+        vec![TransportButton::callback("💎 Подписка", "profile_pay")],
     ])
 }

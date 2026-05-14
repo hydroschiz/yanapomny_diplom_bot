@@ -302,7 +302,9 @@ impl<T: BotTransport> AppHandler<T> {
         match payload.as_str() {
             "setup_menu" => {
                 self.store.update(user_id, AppState::Idle);
-                self.db.update_user_state(peer_id, "waiting_for_message").await?;
+                self.db
+                    .update_user_state(peer_id, "waiting_for_message")
+                    .await?;
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -318,7 +320,9 @@ impl<T: BotTransport> AppHandler<T> {
             "setup_snooze" => {
                 let user = self.db.ensure_user(peer_id).await?;
                 self.store.update(user_id, AppState::AwaitingSnoozeButtons);
-                self.db.update_user_state(peer_id, "waiting_for_time").await?;
+                self.db
+                    .update_user_state(peer_id, "waiting_for_time")
+                    .await?;
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -331,14 +335,20 @@ impl<T: BotTransport> AppHandler<T> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                let text = format!("{}\n\nТекущие: <b>{}</b>", handlers::commands::SNOOZE_PROMPT, current);
+                let text = format!(
+                    "{}\n\nТекущие: <b>{}</b>",
+                    handlers::commands::SNOOZE_PROMPT,
+                    current
+                );
                 send_html_with_keyboard(&self.transport, peer_id, &text, &back_keyboard()).await?;
                 return Ok(());
             }
             "setup_auto" => {
                 let user = self.db.ensure_user(peer_id).await?;
                 self.store.update(user_id, AppState::AwaitingAutoSnooze);
-                self.db.update_user_state(peer_id, "waiting_for_time").await?;
+                self.db
+                    .update_user_state(peer_id, "waiting_for_time")
+                    .await?;
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -394,21 +404,20 @@ impl<T: BotTransport> AppHandler<T> {
                     page % page_count + 1,
                     page_count
                 );
-                send_html_with_keyboard(
-                    &self.transport,
-                    peer_id,
-                    &text,
-                    &utc_keyboard_page(page),
-                )
-                .await?;
+                send_html_with_keyboard(&self.transport, peer_id, &text, &utc_keyboard_page(page))
+                    .await?;
                 return Ok(());
             }
         }
 
         if let Some(rest) = payload.strip_prefix("utc_set:") {
             if let Some(offset) = handlers::text::normalize_offset(rest) {
-                self.db.update_utc_and_clear_timezone(peer_id, &offset).await?;
-                self.db.update_user_state(peer_id, "waiting_for_message").await?;
+                self.db
+                    .update_utc_and_clear_timezone(peer_id, &offset)
+                    .await?;
+                self.db
+                    .update_user_state(peer_id, "waiting_for_message")
+                    .await?;
                 self.store.update(user_id, AppState::Idle);
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
@@ -772,6 +781,8 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }

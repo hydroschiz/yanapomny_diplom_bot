@@ -10,9 +10,7 @@ pub fn channel_subs_keyboard() -> TransportKeyboard {
             TransportButton::callback("🗑 Удалить", "sub_delete"),
             TransportButton::callback("◀️ Назад", "back_main"),
         ],
-        vec![
-            TransportButton::callback("👤 Профиль", "profile"),
-        ],
+        vec![TransportButton::callback("👤 Профиль", "profile")],
     ])
 }
 

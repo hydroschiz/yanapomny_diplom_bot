@@ -100,14 +100,12 @@ pub struct TimeSpec {
     pub spec_type: TimeSpecType,
 
     // ========== Anchor (reference point) ==========
-
     /// Reference point for relative calculations.
     /// Values: "now", "today", "current_week", "next_week", "next_month", "YYYY-MM-DD", "YYYY-MM-DD HH:MM"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 
     // ========== Offsets (time shifts) ==========
-
     /// Offset in minutes (e.g., "через 20 минут").
     #[serde(default, skip_serializing_if = "is_zero")]
     pub offset_minutes: i32,
@@ -138,14 +136,12 @@ pub struct TimeSpec {
     pub offset_direction: Option<OffsetDirection>,
 
     // ========== Weekday specification ==========
-
     /// Day of week for weekday-based reminders.
     /// Values: "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekday: Option<Weekday>,
 
     // ========== Date specification ==========
-
     /// Date in format "MM-DD" (e.g., "09-16" for September 16)
     /// or "DD.MM.YYYY" (e.g., "17.04.2025").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +153,6 @@ pub struct TimeSpec {
     pub day_of_month: i32,
 
     // ========== Positional specification ==========
-
     /// Week of month for complex patterns.
     /// Values: 1 (first), 2 (second), 3 (third), 4 (fourth), -1 (last)
     /// Example: "вторую пятницу каждого месяца" → week_of_month = 2, weekday = friday
@@ -171,7 +166,6 @@ pub struct TimeSpec {
     pub day_position: Option<DayPosition>,
 
     // ========== Time specification ==========
-
     /// Exact time in "HH:MM" format.
     /// Example: "в 14:30" → time = "14:30"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,7 +372,7 @@ pub struct ParseReminderRequest {
 
 impl ParseReminderRequest {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { 
+        Self {
             text: text.into(),
             user_timezone: None,
             user_datetime: None,
@@ -416,15 +410,13 @@ impl RecurrenceInfo {
             RecurrencePattern::Weekly => "week".to_string(),
             RecurrencePattern::Monthly => "month".to_string(),
             RecurrencePattern::Yearly => "year".to_string(),
-            RecurrencePattern::Custom => {
-                match self.interval_unit {
-                    Some(IntervalUnit::Days) => "day".to_string(),
-                    Some(IntervalUnit::Weeks) => "week".to_string(),
-                    Some(IntervalUnit::Months) => "month".to_string(),
-                    Some(IntervalUnit::Years) => "year".to_string(),
-                    None => "day".to_string(),
-                }
-            }
+            RecurrencePattern::Custom => match self.interval_unit {
+                Some(IntervalUnit::Days) => "day".to_string(),
+                Some(IntervalUnit::Weeks) => "week".to_string(),
+                Some(IntervalUnit::Months) => "month".to_string(),
+                Some(IntervalUnit::Years) => "year".to_string(),
+                None => "day".to_string(),
+            },
         }
     }
 }
@@ -434,12 +426,11 @@ impl ParsedReminder {
     pub fn to_legacy_delay(&self) -> String {
         match self.reminder_type {
             ReminderType::OneTime => String::new(),
-            ReminderType::Recurring => {
-                self.recurrence
-                    .as_ref()
-                    .map(|r| r.to_legacy_delay())
-                    .unwrap_or_default()
-            }
+            ReminderType::Recurring => self
+                .recurrence
+                .as_ref()
+                .map(|r| r.to_legacy_delay())
+                .unwrap_or_default(),
         }
     }
 }
@@ -582,10 +573,10 @@ mod tests {
 
         let response: ReminderResponse = serde_json::from_str(json).unwrap();
         let reminder = response.reminder.unwrap();
-        
+
         // Check legacy delay before moving time_spec
         assert_eq!(reminder.to_legacy_delay(), "month");
-        
+
         let ts = reminder.time_spec.unwrap();
         assert_eq!(ts.spec_type, TimeSpecType::Monthly);
         assert_eq!(ts.day_of_month, 28);
@@ -611,10 +602,10 @@ mod tests {
 
         let response: ReminderResponse = serde_json::from_str(json).unwrap();
         let reminder = response.reminder.unwrap();
-        
+
         // Check legacy delay before moving time_spec
         assert_eq!(reminder.to_legacy_delay(), "year");
-        
+
         let ts = reminder.time_spec.unwrap();
         assert_eq!(ts.spec_type, TimeSpecType::Yearly);
         assert_eq!(ts.date, Some("05-30".to_string()));

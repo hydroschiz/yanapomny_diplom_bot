@@ -1,14 +1,15 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use mongodb::{
-    Client, Collection, Database, IndexModel,
     bson::{
-        Document, doc,
+        doc,
         serde_helpers::{
             chrono_datetime_as_bson_datetime, chrono_datetime_as_bson_datetime_optional,
         },
+        Document,
     },
     options::{ClientOptions, FindOneAndUpdateOptions, IndexOptions, ReturnDocument},
+    Client, Collection, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -362,7 +363,12 @@ impl Db {
     }
 
     /// Ensure a group subscription record exists.
-    pub async fn ensure_group_record(&self, id: i64, name: String, owner_id: i64) -> Result<UserRecord> {
+    pub async fn ensure_group_record(
+        &self,
+        id: i64,
+        name: String,
+        owner_id: i64,
+    ) -> Result<UserRecord> {
         if let Some(mut record) = self.find_record(id).await? {
             // Update metadata if needed
             if !record.is_group || record.group_name != name || record.owner_id != Some(owner_id) {
@@ -385,7 +391,12 @@ impl Db {
     }
 
     /// Create a new group record.
-    pub async fn create_group_record(&self, id: i64, name: String, owner_id: i64) -> Result<UserRecord> {
+    pub async fn create_group_record(
+        &self,
+        id: i64,
+        name: String,
+        owner_id: i64,
+    ) -> Result<UserRecord> {
         let mut record = UserRecord::new_trial(id);
         record.is_group = true;
         record.group_name = name;
@@ -463,11 +474,7 @@ impl Db {
     }
 
     /// Update transaction status.
-    pub async fn update_transaction_status(
-        &self,
-        payment_id: &str,
-        status: &str,
-    ) -> Result<()> {
+    pub async fn update_transaction_status(&self, payment_id: &str, status: &str) -> Result<()> {
         let filter = doc! {"paymentId": payment_id};
         let update = doc! {
             "$set": {
@@ -517,9 +524,7 @@ impl Db {
             "id": user_id,
             "status": { "$nin": ["sent", "failed", "7"] }
         };
-        let options = FindOptions::builder()
-            .sort(doc! { "time": 1 })
-            .build();
+        let options = FindOptions::builder().sort(doc! { "time": 1 }).build();
 
         let cursor = self.reminders().find(filter, options).await?;
         let reminders: Vec<Reminder> = cursor.try_collect().await?;
@@ -563,14 +568,14 @@ impl Db {
             .build();
 
         let mut claimed = Vec::new();
-        
+
         // Claim up to batch_size reminders atomically
         for _ in 0..batch_size {
-            match self.reminders().find_one_and_update(
-                filter.clone(),
-                update.clone(),
-                options.clone()
-            ).await? {
+            match self
+                .reminders()
+                .find_one_and_update(filter.clone(), update.clone(), options.clone())
+                .await?
+            {
                 Some(reminder) => claimed.push(reminder),
                 None => break, // No more due reminders
             }
@@ -724,11 +729,12 @@ impl Db {
             .unwrap_or(now)
             .with_second(0)
             .unwrap_or(now);
-        
-        let start_of_last_month = start_of_this_month - chrono::Duration::days(
-            start_of_this_month.day() as i64
-        );
-        let start_of_last_month = start_of_last_month.with_day(1).unwrap_or(start_of_last_month);
+
+        let start_of_last_month =
+            start_of_this_month - chrono::Duration::days(start_of_this_month.day() as i64);
+        let start_of_last_month = start_of_last_month
+            .with_day(1)
+            .unwrap_or(start_of_last_month);
 
         let filter = doc! {
             "id": user_id,
@@ -750,7 +756,7 @@ impl Db {
             "status": { "$nin": ["sent", "failed", "7"] }
         };
         let options = FindOneOptions::builder()
-            .sort(doc! { "time": 1 })  // Get the next upcoming reminder
+            .sort(doc! { "time": 1 }) // Get the next upcoming reminder
             .build();
 
         Ok(self.reminders().find_one(filter, options).await?)
@@ -760,7 +766,10 @@ impl Db {
 
     /// Get users whose subscriptions expire within N days.
     /// Returns users where nextPaymentDate is between now and now + days.
-    pub async fn get_users_with_expiring_subscriptions(&self, days_before: i32) -> Result<Vec<UserRecord>> {
+    pub async fn get_users_with_expiring_subscriptions(
+        &self,
+        days_before: i32,
+    ) -> Result<Vec<UserRecord>> {
         use futures::TryStreamExt;
 
         let now = Utc::now();
@@ -827,7 +836,9 @@ impl Db {
                 "remindersDeletedAt": mongodb::bson::DateTime::from_chrono(Utc::now())
             }
         };
-        self.records().update_one(record_filter, record_update, None).await?;
+        self.records()
+            .update_one(record_filter, record_update, None)
+            .await?;
 
         Ok(result.deleted_count as i64)
     }
@@ -918,7 +929,10 @@ impl Db {
             "platform": mongodb::bson::to_bson(&platform)?,
             "channelId": channel_id
         };
-        let count = self.channel_subscriptions().count_documents(filter, None).await?;
+        let count = self
+            .channel_subscriptions()
+            .count_documents(filter, None)
+            .await?;
         Ok(count > 0)
     }
 
@@ -928,13 +942,16 @@ impl Db {
             "userId": user_id,
             "subNum": sub_num
         };
-        let result = self.channel_subscriptions().delete_one(filter, None).await?;
-        
+        let result = self
+            .channel_subscriptions()
+            .delete_one(filter, None)
+            .await?;
+
         // Renumber remaining subscriptions
         if result.deleted_count > 0 {
             self.renumber_channel_subs(user_id).await?;
         }
-        
+
         Ok(result.deleted_count > 0)
     }
 
@@ -957,7 +974,9 @@ impl Db {
                     "channelId": &sub.channel_id
                 };
                 let update = doc! { "$set": { "subNum": new_num } };
-                self.channel_subscriptions().update_one(filter, update, None).await?;
+                self.channel_subscriptions()
+                    .update_one(filter, update, None)
+                    .await?;
             }
         }
         Ok(())
@@ -990,7 +1009,9 @@ impl Db {
                 "isLive": is_live
             }
         };
-        self.channel_subscriptions().update_many(filter, update, None).await?;
+        self.channel_subscriptions()
+            .update_many(filter, update, None)
+            .await?;
         Ok(())
     }
 
@@ -1014,7 +1035,10 @@ impl Db {
     /// Count user's channel subscriptions.
     pub async fn count_user_channel_subs(&self, user_id: i64) -> Result<i64> {
         let filter = doc! { "userId": user_id };
-        let count = self.channel_subscriptions().count_documents(filter, None).await?;
+        let count = self
+            .channel_subscriptions()
+            .count_documents(filter, None)
+            .await?;
         Ok(count as i64)
     }
 
@@ -1048,7 +1072,11 @@ impl Db {
     /// Get the referrer ID for a given invited user.
     pub async fn get_referrer_of(&self, invited_id: i64) -> Result<Option<i64>> {
         let filter = doc! { "invitedId": invited_id };
-        Ok(self.referrals().find_one(filter, None).await?.map(|r| r.referrer_id))
+        Ok(self
+            .referrals()
+            .find_one(filter, None)
+            .await?
+            .map(|r| r.referrer_id))
     }
 
     /// Count how many users were invited by a referrer.
@@ -1062,7 +1090,7 @@ impl Db {
     /// Returns Some(referrer_id) if reward should be granted, None otherwise.
     pub async fn consume_referral_reward(&self, invited_id: i64) -> Result<Option<i64>> {
         let filter = doc! { "invitedId": invited_id };
-        
+
         if let Some(referral) = self.referrals().find_one(filter.clone(), None).await? {
             // Already rewarded
             if referral.rewarded_at.is_some() {

@@ -190,9 +190,7 @@ mod tests {
 
     #[test]
     fn test_keyboard_new() {
-        let kb = TransportKeyboard::new(vec![
-            vec![TransportButton::callback("X", "x")],
-        ]);
+        let kb = TransportKeyboard::new(vec![vec![TransportButton::callback("X", "x")]]);
         assert_eq!(kb.rows.len(), 1);
     }
 }

@@ -3,13 +3,13 @@ use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 
 use super::text::timezone_offset_string;
 use crate::api::db::Db;
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::bot::{
     keyboards::{profile_back_keyboard, setup_keyboard, utc_keyboard, utc_keyboard_page_count},
     router::HandlerResult,
     states::AppState,
 };
-#[cfg(feature = "telegram-legacy")]
-use crate::bot::router::AppDialogue;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -58,7 +58,9 @@ pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
             .branch(dptree::case![Command::Pay].endpoint(super::pay::command_pay))
             .branch(dptree::case![Command::List].endpoint(super::reminder::handle_list_command))
             .branch(dptree::case![Command::Subs].endpoint(super::channels::command_subs))
-            .branch(dptree::case![Command::Profile].endpoint(super::profile::handle_profile_command))
+            .branch(
+                dptree::case![Command::Profile].endpoint(super::profile::handle_profile_command),
+            )
             .branch(dptree::case![Command::Ref].endpoint(super::referral::command_ref))
             .branch(dptree::case![Command::Remind(text)].endpoint(command_remind)),
     )
@@ -91,7 +93,11 @@ async fn command_remind(
 
     if let teloxide::types::ChatKind::Public(chat) = &msg.chat.kind {
         let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
-        let owner_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(chat_key);
+        let owner_id = msg
+            .from
+            .as_ref()
+            .map(|user| user.id.0 as i64)
+            .unwrap_or(chat_key);
         let _ = db.ensure_group_record(chat_key, title, owner_id).await?;
 
         let user = db.ensure_user(chat_key).await?;
@@ -131,21 +137,33 @@ async fn command_remind(
             return Ok(());
         }
 
-        return super::reminder::start_reminder_creation_flow(bot, chat_id, reminder_text, dialogue).await;
+        return super::reminder::start_reminder_creation_flow(
+            bot,
+            chat_id,
+            reminder_text,
+            dialogue,
+        )
+        .await;
     }
 
     let user = match db.find_user(chat_key).await? {
         Some(user) => user,
         None => {
-            bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /start")
-                .await?;
+            bot.send_message(
+                chat_id,
+                "Пожалуйста, сначала настройте часовой пояс командой /start",
+            )
+            .await?;
             return Ok(());
         }
     };
 
     if !user_has_timezone(&user) {
-        bot.send_message(chat_id, "Пожалуйста, сначала настройте часовой пояс командой /utc")
-            .await?;
+        bot.send_message(
+            chat_id,
+            "Пожалуйста, сначала настройте часовой пояс командой /utc",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -285,7 +303,8 @@ pub async fn command_utc(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) 
 #[cfg(feature = "telegram-legacy")]
 pub async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db) -> HandlerResult {
     dialogue.update(AppState::Idle).await?;
-    db.update_user_state(msg.chat.id.0, "waiting_for_message").await?;
+    db.update_user_state(msg.chat.id.0, "waiting_for_message")
+        .await?;
 
     bot.send_message(msg.chat.id, SETUP_PROMPT)
         .parse_mode(ParseMode::Html)
@@ -306,9 +325,12 @@ pub async fn start_utc_flow(
     dialogue.update(AppState::AwaitingUtc).await?;
 
     let current_tz = if !user.time_zone.is_empty() {
-        let offset = timezone_offset_string(&user.time_zone)
-            .unwrap_or_else(|| "+00:00".to_string());
-        format!("Текущий часовой пояс: <b>{} ({})</b>", user.time_zone, offset)
+        let offset =
+            timezone_offset_string(&user.time_zone).unwrap_or_else(|| "+00:00".to_string());
+        format!(
+            "Текущий часовой пояс: <b>{} ({})</b>",
+            user.time_zone, offset
+        )
     } else if user.utc.to_lowercase() != "nil" && !user.utc.is_empty() {
         format!("Текущий часовой пояс: <b>UTC {}</b>", user.utc)
     } else {
@@ -347,29 +369,31 @@ pub async fn command_start(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db
 📢 Новости и обновления — в канале @yanapomnyu"#;
 
     let user_id = msg.chat.id.0;
-    
+
     // Check if it's a group chat
     use teloxide::types::ChatKind;
     if let ChatKind::Public(chat) = &msg.chat.kind {
         // Create/Update group record
         let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
         if let Some(from) = &msg.from {
-             let _ = db.ensure_group_record(user_id, title, from.id.0 as i64).await;
+            let _ = db
+                .ensure_group_record(user_id, title, from.id.0 as i64)
+                .await;
         }
-        
+
         // Also ensure User struct for preferences
         let user = db.ensure_user(user_id).await?;
         if user.time_zone.is_empty() && (user.utc.is_empty() || user.utc.to_lowercase() == "nil") {
-             // For groups, just send message about setting UTC, don't start dialogue flow (state issues)
-             // Or we can start it if we assume one admin interacting
-             start_utc_flow(bot, msg.chat.id, dialogue, db).await?;
-             return Ok(());
+            // For groups, just send message about setting UTC, don't start dialogue flow (state issues)
+            // Or we can start it if we assume one admin interacting
+            start_utc_flow(bot, msg.chat.id, dialogue, db).await?;
+            return Ok(());
         }
-        
+
         bot.send_message(msg.chat.id, text)
             .parse_mode(ParseMode::Html)
             .await?;
-            
+
         return Ok(());
     }
 
@@ -477,9 +501,12 @@ pub async fn start_utc_flow_transport<T: BotTransport>(
     store.update(user_id, AppState::AwaitingUtc);
 
     let current_tz = if !user.time_zone.is_empty() {
-        let offset = timezone_offset_string(&user.time_zone)
-            .unwrap_or_else(|| "+00:00".to_string());
-        format!("Текущий часовой пояс: <b>{} ({})</b>", user.time_zone, offset)
+        let offset =
+            timezone_offset_string(&user.time_zone).unwrap_or_else(|| "+00:00".to_string());
+        format!(
+            "Текущий часовой пояс: <b>{} ({})</b>",
+            user.time_zone, offset
+        )
     } else if user.utc.to_lowercase() != "nil" && !user.utc.is_empty() {
         format!("Текущий часовой пояс: <b>UTC {}</b>", user.utc)
     } else {
@@ -632,7 +659,10 @@ pub async fn command_remind_transport<T: BotTransport>(
         Some(user) => user,
         None => {
             transport
-                .send_text(peer_id, "Пожалуйста, сначала настройте часовой пояс командой /start")
+                .send_text(
+                    peer_id,
+                    "Пожалуйста, сначала настройте часовой пояс командой /start",
+                )
                 .await?;
             return Ok(());
         }
@@ -640,7 +670,10 @@ pub async fn command_remind_transport<T: BotTransport>(
 
     if !user_has_timezone(&user) {
         transport
-            .send_text(peer_id, "Пожалуйста, сначала настройте часовой пояс командой /utc")
+            .send_text(
+                peer_id,
+                "Пожалуйста, сначала настройте часовой пояс командой /utc",
+            )
             .await?;
         return Ok(());
     }
@@ -679,6 +712,8 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }

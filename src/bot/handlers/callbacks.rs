@@ -28,12 +28,17 @@ pub async fn handle_callback(
     } else {
         return Ok(());
     };
-    let chat_id = if let Some(msg) = &cq.message { msg.chat().id } else { return Ok(()) };
+    let chat_id = if let Some(msg) = &cq.message {
+        msg.chat().id
+    } else {
+        return Ok(());
+    };
 
     match data.as_str() {
         "setup_menu" => {
             dialogue.update(AppState::Idle).await?;
-            db.update_user_state(chat_id.0, "waiting_for_message").await?;
+            db.update_user_state(chat_id.0, "waiting_for_message")
+                .await?;
             bot.answer_callback_query(cq.id).await?;
             bot.send_message(chat_id, SETUP_PROMPT)
                 .parse_mode(teloxide::types::ParseMode::Html)
@@ -216,14 +221,16 @@ pub async fn handle_callback(
             // Show referral program
             bot.answer_callback_query(cq.id).await?;
             let transport = TelegramTransport::new(bot);
-            return super::referral::send_referral_message(&transport, chat_id.0, chat_id.0, &db).await;
+            return super::referral::send_referral_message(&transport, chat_id.0, chat_id.0, &db)
+                .await;
         }
         "profile_pay" => {
             // Show payment menu
             bot.answer_callback_query(cq.id).await?;
             if let Some(msg) = cq.message {
                 if let Some(regular_msg) = msg.regular_message().cloned() {
-                    return super::pay::command_pay(bot, regular_msg, dialogue, db, payment_svc).await;
+                    return super::pay::command_pay(bot, regular_msg, dialogue, db, payment_svc)
+                        .await;
                 }
             }
             return Ok(());
@@ -250,7 +257,12 @@ pub async fn handle_callback(
 
     // Handle reminder list callback
     if data == "reminder_list" {
-        return super::reminder::handle_list_command(bot, cq.message.unwrap().regular_message().cloned().unwrap(), db).await;
+        return super::reminder::handle_list_command(
+            bot,
+            cq.message.unwrap().regular_message().cloned().unwrap(),
+            db,
+        )
+        .await;
     }
 
     // Unknown callback data: send quick error.
@@ -261,13 +273,10 @@ pub async fn handle_callback(
 }
 
 /// Handle snooze callback: snooze:{rem_id}:{code}
-async fn handle_snooze_callback(
-    bot: Bot,
-    cq: CallbackQuery,
-    db: Db,
-    data: &str,
-) -> HandlerResult {
-    use crate::bot::keyboards::{reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes};
+async fn handle_snooze_callback(bot: Bot, cq: CallbackQuery, db: Db, data: &str) -> HandlerResult {
+    use crate::bot::keyboards::{
+        reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes,
+    };
     use crate::scheduler::format_full_reminder_time_for_user;
 
     let chat_id = match cq.message {
@@ -318,7 +327,7 @@ async fn handle_snooze_callback(
 
     // Snooze the reminder
     let new_time = db.snooze_reminder(rem_id, minutes).await?;
-    
+
     // Get user for timezone
     let user = db.ensure_user(chat_id.0).await?;
     let time_display = format_full_reminder_time_for_user(&new_time, &user);
@@ -406,7 +415,7 @@ async fn handle_reminder_done_callback(
     } else {
         // One-time reminder: delete it
         db.complete_reminder(rem_id).await?;
-        
+
         // Build completed message (with strikethrough)
         format!(
             "Напоминание выполнено ✅ 📅 <s>{} ▹ {}</s>",

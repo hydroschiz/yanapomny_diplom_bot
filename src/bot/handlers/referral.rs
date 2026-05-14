@@ -48,6 +48,8 @@ async fn send_with_keyboard<T: BotTransport>(
     text: &str,
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
-    transport.send_with_keyboard(peer_id, text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, text, keyboard)
+        .await?;
     Ok(())
 }

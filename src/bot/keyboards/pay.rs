@@ -9,13 +9,19 @@ use crate::transport::traits::{TransportButton, TransportKeyboard};
 /// - `pay_cancel` - отмена
 pub fn pay_menu_keyboard() -> TransportKeyboard {
     TransportKeyboard::new(vec![
-        vec![TransportButton::callback("3 месяца за 195₽ (65₽/мес)", "pay_select:3")],
-        vec![TransportButton::callback("6 месяцев за 360₽ (60₽/мес)", "pay_select:6")],
-        vec![TransportButton::callback("12 месяцев за 660₽ (55₽/мес)", "pay_select:12")],
-        vec![TransportButton::url(
-            "О сервисе",
-            "https://t.me/yanapomnyu",
+        vec![TransportButton::callback(
+            "3 месяца за 195₽ (65₽/мес)",
+            "pay_select:3",
         )],
+        vec![TransportButton::callback(
+            "6 месяцев за 360₽ (60₽/мес)",
+            "pay_select:6",
+        )],
+        vec![TransportButton::callback(
+            "12 месяцев за 660₽ (55₽/мес)",
+            "pay_select:12",
+        )],
+        vec![TransportButton::url("О сервисе", "https://t.me/yanapomnyu")],
         vec![TransportButton::callback("👤 Профиль", "profile")],
     ])
 }

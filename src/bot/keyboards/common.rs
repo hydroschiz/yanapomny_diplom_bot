@@ -22,7 +22,10 @@ const UTC_KEYBOARD_PAGE_SIZE: usize = 7;
 /// - Профиль -> `profile`
 pub fn setup_keyboard() -> TransportKeyboard {
     TransportKeyboard::new(vec![
-        vec![TransportButton::callback("Время откладывания", "setup_snooze")],
+        vec![TransportButton::callback(
+            "Время откладывания",
+            "setup_snooze",
+        )],
         vec![TransportButton::callback("Авто откладывание", "setup_auto")],
         vec![TransportButton::callback("Время суток (UTC)", "setup_utc")],
         vec![TransportButton::callback("👤 Профиль", "profile")],
@@ -31,15 +34,19 @@ pub fn setup_keyboard() -> TransportKeyboard {
 
 /// Клавиатура кнопки "Назад" для возврата в меню настроек.
 pub fn back_keyboard() -> TransportKeyboard {
-    TransportKeyboard::new(vec![vec![TransportButton::callback("⬅ Назад", "setup_menu")]])
+    TransportKeyboard::new(vec![vec![TransportButton::callback(
+        "⬅ Назад",
+        "setup_menu",
+    )]])
 }
 
 /// Навигационная клавиатура только с кнопкой "Профиль".
 /// Для разделов, откуда "Назад" ведёт в профиль.
 pub fn profile_back_keyboard() -> TransportKeyboard {
-    TransportKeyboard::new(vec![vec![
-        TransportButton::callback("👤 Профиль", "profile"),
-    ]])
+    TransportKeyboard::new(vec![vec![TransportButton::callback(
+        "👤 Профиль",
+        "profile",
+    )]])
 }
 
 /// Клавиатура выбора UTC смещения.

@@ -9,13 +9,13 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatKind, ParseMode};
 
 use crate::api::db::Db;
+#[cfg(feature = "telegram-legacy")]
+use crate::bot::router::AppDialogue;
 use crate::bot::{
     keyboards::{common::OFFSETS, utc_keyboard},
     router::HandlerResult,
     states::AppState,
 };
-#[cfg(feature = "telegram-legacy")]
-use crate::bot::router::AppDialogue;
 use crate::config::Config;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
@@ -88,7 +88,11 @@ pub async fn handle_group_text(
 
     if let ChatKind::Public(chat) = &msg.chat.kind {
         let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
-        let owner_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(msg.chat.id.0);
+        let owner_id = msg
+            .from
+            .as_ref()
+            .map(|user| user.id.0 as i64)
+            .unwrap_or(msg.chat.id.0);
         let _ = db.ensure_group_record(group_id, title, owner_id).await?;
     }
 
@@ -108,7 +112,7 @@ pub async fn handle_group_text(
     // Check subscriptions
     // 1. Check group subscription
     let mut is_allowed = db.is_subscription_active(group_id).await?;
-    
+
     // 2. Check sender subscription
     if !is_allowed {
         if let Some(user) = &msg.from {
@@ -122,16 +126,16 @@ pub async fn handle_group_text(
     if !is_allowed {
         if let Some(record) = db.find_record(group_id).await? {
             if let Some(owner_id) = record.owner_id {
-                 if db.is_subscription_active(owner_id).await? {
+                if db.is_subscription_active(owner_id).await? {
                     is_allowed = true;
-                 }
+                }
             }
         }
     }
 
     if !is_allowed {
-         bot.send_message(msg.chat.id, "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.").await?;
-         return Ok(());
+        bot.send_message(msg.chat.id, "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.").await?;
+        return Ok(());
     }
 
     super::reminder::start_reminder_creation_flow(bot, msg.chat.id, clean_text, dialogue).await
@@ -157,7 +161,9 @@ pub fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<Stri
         }
 
         let mut suffix = &after_at[username.len()..];
-        suffix = suffix.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | ';' | '-' | '!' | '?'));
+        suffix = suffix.trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | ':' | ';' | '-' | '!' | '?')
+        });
 
         let prefix = text[..at_index].trim_end();
         let cleaned = if prefix.is_empty() {
@@ -242,11 +248,7 @@ pub async fn handle_group_text_transport<T: BotTransport>(
     }
 
     super::reminder::start_reminder_creation_flow_transport(
-        transport,
-        peer_id,
-        user_id,
-        clean_text,
-        store,
+        transport, peer_id, user_id, clean_text, store,
     )
     .await
 }
@@ -323,7 +325,12 @@ pub async fn handle_snooze_input_transport<T: BotTransport>(
         if let Some(code) = snooze_code(m) {
             codes.push(code);
         } else {
-            transport.send_text(peer_id, "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.").await?;
+            transport
+                .send_text(
+                    peer_id,
+                    "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.",
+                )
+                .await?;
             return Ok(());
         }
     }
@@ -480,14 +487,18 @@ pub async fn handle_snooze_input(
         if let Some(code) = snooze_code(m) {
             codes.push(code);
         } else {
-            bot.send_message(chat_id, "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.")
-                .await?;
+            bot.send_message(
+                chat_id,
+                "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.",
+            )
+            .await?;
             return Ok(());
         }
     }
 
     db.update_snooze_buttons(chat_id.0, codes.clone()).await?;
-    db.update_user_state(chat_id.0, "waiting_for_message").await?;
+    db.update_user_state(chat_id.0, "waiting_for_message")
+        .await?;
     dialogue.update(AppState::Idle).await?;
 
     let human = codes
@@ -533,12 +544,14 @@ pub async fn handle_auto_snooze_input(
     let code = if let Some(c) = code {
         c
     } else {
-        bot.send_message(chat_id, "Некорректное время. Доступно: 5,10,15,20 мин.").await?;
+        bot.send_message(chat_id, "Некорректное время. Доступно: 5,10,15,20 мин.")
+            .await?;
         return Ok(());
     };
 
     db.update_auto_delay(chat_id.0, code.to_string()).await?;
-    db.update_user_state(chat_id.0, "waiting_for_message").await?;
+    db.update_user_state(chat_id.0, "waiting_for_message")
+        .await?;
     dialogue.update(AppState::Idle).await?;
 
     bot.send_message(
@@ -718,6 +731,8 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }

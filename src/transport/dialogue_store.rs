@@ -166,18 +166,24 @@ mod tests {
         let store = DialogueStore::new();
         store.update(1, AppState::AwaitingUtc);
         store.update(2, AppState::Idle);
-        store.update(3, AppState::AwaitingReminderConfirmation {
-            pending: crate::bot::states::PendingReminder {
-                original_text: "test".to_string(),
-                description: "desc".to_string(),
-                time_display: "tomorrow".to_string(),
-                parsed_json: "{}".to_string(),
+        store.update(
+            3,
+            AppState::AwaitingReminderConfirmation {
+                pending: crate::bot::states::PendingReminder {
+                    original_text: "test".to_string(),
+                    description: "desc".to_string(),
+                    time_display: "tomorrow".to_string(),
+                    parsed_json: "{}".to_string(),
+                },
             },
-        });
+        );
 
         assert_eq!(store.len(), 3);
         assert_eq!(store.get(1), AppState::AwaitingUtc);
         assert_eq!(store.get(2), AppState::Idle);
-        assert!(matches!(store.get(3), AppState::AwaitingReminderConfirmation { .. }));
+        assert!(matches!(
+            store.get(3),
+            AppState::AwaitingReminderConfirmation { .. }
+        ));
     }
 }

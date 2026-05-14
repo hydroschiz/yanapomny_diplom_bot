@@ -8,9 +8,9 @@ use tracing::info;
 
 use crate::api::db::{ChannelSubscription, Db, Platform};
 use crate::bot::keyboards::channel_subs_keyboard;
-use crate::bot::router::HandlerResult;
 #[cfg(feature = "telegram-legacy")]
 use crate::bot::router::AppDialogue;
+use crate::bot::router::HandlerResult;
 use crate::bot::states::AppState;
 #[cfg(feature = "telegram-legacy")]
 use crate::transport::adapters::TelegramTransport;
@@ -128,7 +128,11 @@ pub async fn command_subs_transport<T: BotTransport>(
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn command_subs(bot: Bot, msg: Message, db: Db) -> HandlerResult {
     let peer_id = msg.chat.id.0;
-    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let user_id = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
     command_subs_transport(&transport, peer_id, user_id, db).await
@@ -187,7 +191,11 @@ pub async fn handle_channel_url(
 ) -> HandlerResult {
     let text = msg.text().unwrap_or("");
     let peer_id = msg.chat.id.0;
-    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let user_id = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
     handle_channel_url_core(&transport, peer_id, user_id, text, &dialogue, db).await
@@ -215,7 +223,11 @@ pub async fn handle_sub_delete_num(
 ) -> HandlerResult {
     let text = msg.text().unwrap_or("");
     let peer_id = msg.chat.id.0;
-    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let user_id = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(peer_id);
     let transport = TelegramTransport::new(bot);
 
     handle_sub_delete_num_core(&transport, peer_id, user_id, text, &dialogue, db).await
@@ -237,7 +249,10 @@ where
     let text = text.trim();
     if text.is_empty() {
         transport
-            .send_text(peer_id, "Пожалуйста, отправь ссылку на канал Twitch или YouTube.")
+            .send_text(
+                peer_id,
+                "Пожалуйста, отправь ссылку на канал Twitch или YouTube.",
+            )
             .await?;
         return Ok(());
     }
@@ -357,7 +372,11 @@ where
     let deleted = db.delete_channel_sub(user_id, num).await?;
 
     if deleted {
-        info!(user_id = user_id, sub_num = num, "Deleted channel subscription");
+        info!(
+            user_id = user_id,
+            sub_num = num,
+            "Deleted channel subscription"
+        );
         transport
             .send_text(peer_id, &format!("✅ Подписка #{} удалена.", num))
             .await?;
@@ -404,15 +423,7 @@ pub async fn handle_sub_delete_callback(
     let user_id = q.from.id.0 as i64;
     let transport = TelegramTransport::new(bot);
 
-    handle_sub_delete_callback_core(
-        &transport,
-        &q.id.0,
-        user_id,
-        peer_id,
-        &dialogue,
-        db,
-    )
-    .await
+    handle_sub_delete_callback_core(&transport, &q.id.0, user_id, peer_id, &dialogue, db).await
 }
 
 /// Handle "subs" callback through transport abstraction.
@@ -512,6 +523,8 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }

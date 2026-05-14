@@ -13,9 +13,9 @@ use crate::bot::keyboards::{
     delete_keyboard, list_delete_keyboard, reminder_confirm_keyboard, reminder_edit_keyboard,
     reminder_snoozed_keyboard, snooze_code_to_label, snooze_code_to_minutes, text_confirm_keyboard,
 };
-use crate::bot::router::HandlerResult;
 #[cfg(feature = "telegram-legacy")]
 use crate::bot::router::AppDialogue;
+use crate::bot::router::HandlerResult;
 use crate::bot::states::{AppState, PendingReminder, PendingText};
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
@@ -287,7 +287,12 @@ pub async fn handle_snooze_callback_transport<T: BotTransport>(
         Ok(id) => id,
         Err(_) => {
             transport
-                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный ID напоминания"))
+                .answer_callback(
+                    event_id,
+                    user_id,
+                    peer_id,
+                    Some("Ошибка: неверный ID напоминания"),
+                )
                 .await?;
             return Ok(());
         }
@@ -298,7 +303,12 @@ pub async fn handle_snooze_callback_transport<T: BotTransport>(
         Some(m) => m,
         None => {
             transport
-                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный интервал"))
+                .answer_callback(
+                    event_id,
+                    user_id,
+                    peer_id,
+                    Some("Ошибка: неверный интервал"),
+                )
                 .await?;
             return Ok(());
         }
@@ -349,7 +359,12 @@ pub async fn handle_reminder_done_callback_transport<T: BotTransport>(
         Ok(id) => id,
         Err(_) => {
             transport
-                .answer_callback(event_id, user_id, peer_id, Some("Ошибка: неверный ID напоминания"))
+                .answer_callback(
+                    event_id,
+                    user_id,
+                    peer_id,
+                    Some("Ошибка: неверный ID напоминания"),
+                )
                 .await?;
             return Ok(());
         }

@@ -1,5 +1,5 @@
 //! Load test for the scheduler.
-//! 
+//!
 //! This test simulates high load by creating many reminders
 //! and verifying the scheduler handles them correctly.
 //!
@@ -31,7 +31,7 @@ async fn test_scheduler_atomic_claiming() {
     let test_prefix = format!("LOAD_TEST_{}", Utc::now().timestamp());
     let now = Utc::now();
     let past_time = now - Duration::minutes(5);
-    
+
     println!("Creating 100 test reminders with prefix: {}", test_prefix);
 
     // Insert 100 test reminders
@@ -66,7 +66,7 @@ async fn test_scheduler_atomic_claiming() {
         "status": "active"
     };
     let update = doc! { "$set": { "status": "processing" } };
-    
+
     // First batch claim
     let mut claimed = 0;
     for _ in 0..50 {
@@ -111,7 +111,10 @@ async fn test_scheduler_atomic_claiming() {
         .find_one_and_update(filter.clone(), update.clone(), None)
         .await
         .unwrap();
-    assert!(result.is_none(), "Should have no more active reminders to claim");
+    assert!(
+        result.is_none(),
+        "Should have no more active reminders to claim"
+    );
 
     // Clean up test data
     println!("Cleaning up test data...");
@@ -140,7 +143,7 @@ async fn test_scheduler_retry_logic() {
 
     let test_prefix = format!("RETRY_TEST_{}", Utc::now().timestamp());
     let now = Utc::now();
-    
+
     println!("Testing retry logic with prefix: {}", test_prefix);
 
     // Create a reminder
@@ -175,7 +178,7 @@ async fn test_scheduler_retry_logic() {
         .await
         .unwrap()
         .unwrap();
-    
+
     assert_eq!(reminder.get_str("status").unwrap(), "retry");
     assert_eq!(reminder.get_i32("retryCount").unwrap(), 1);
     println!("Retry scheduled correctly");
@@ -189,7 +192,7 @@ async fn test_scheduler_retry_logic() {
     println!("\n✅ Retry logic test passed!");
 }
 
-#[tokio::test] 
+#[tokio::test]
 async fn test_scheduler_no_duplicate_claims() {
     let mongo_uri = match env::var("MONGO_URI") {
         Ok(uri) => uri,
@@ -205,7 +208,7 @@ async fn test_scheduler_no_duplicate_claims() {
 
     let test_prefix = format!("DEDUP_TEST_{}", Utc::now().timestamp());
     let past_time = Utc::now() - Duration::minutes(1);
-    
+
     println!("Testing no duplicate claims with prefix: {}", test_prefix);
 
     // Create 10 reminders
@@ -235,11 +238,16 @@ async fn test_scheduler_no_duplicate_claims() {
         let coll = collection.clone();
         let f = filter.clone();
         let u = update.clone();
-        
+
         handles.push(tokio::spawn(async move {
             let mut claimed = 0;
             for _ in 0..10 {
-                if coll.find_one_and_update(f.clone(), u.clone(), None).await.unwrap().is_some() {
+                if coll
+                    .find_one_and_update(f.clone(), u.clone(), None)
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
                     claimed += 1;
                 }
             }
@@ -256,7 +264,10 @@ async fn test_scheduler_no_duplicate_claims() {
     }
 
     // Should claim exactly 10 (no duplicates!)
-    assert_eq!(total_claimed, 10, "Total claimed should be exactly 10 (no duplicates)");
+    assert_eq!(
+        total_claimed, 10,
+        "Total claimed should be exactly 10 (no duplicates)"
+    );
     println!("Total claimed: {} (expected: 10)", total_claimed);
 
     // Clean up

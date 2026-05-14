@@ -9,9 +9,9 @@ use teloxide::prelude::*;
 use crate::api::db::Db;
 use crate::api::payments::{get_tariff, PaymentService};
 use crate::bot::keyboards::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
-use crate::bot::router::HandlerResult;
 #[cfg(feature = "telegram-legacy")]
 use crate::bot::router::AppDialogue;
+use crate::bot::router::HandlerResult;
 use crate::bot::states::AppState;
 #[cfg(feature = "telegram-legacy")]
 use crate::transport::adapters::TelegramTransport;

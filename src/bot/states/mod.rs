@@ -28,13 +28,21 @@ pub enum AppState {
     AwaitingSnoozeButtons,
     AwaitingAutoSnooze,
     /// User is in payment flow, storing selected months.
-    AwaitingPayment { months: i32 },
+    AwaitingPayment {
+        months: i32,
+    },
     /// User sent text, awaiting confirmation BEFORE LLM parsing.
-    AwaitingTextConfirmation { pending: PendingText },
+    AwaitingTextConfirmation {
+        pending: PendingText,
+    },
     /// User confirmed, LLM parsed, awaiting final create/edit/cancel.
-    AwaitingReminderConfirmation { pending: PendingReminder },
+    AwaitingReminderConfirmation {
+        pending: PendingReminder,
+    },
     /// User is editing reminder text before confirmation.
-    AwaitingReminderEdit { pending: PendingReminder },
+    AwaitingReminderEdit {
+        pending: PendingReminder,
+    },
     /// User is in reminder deletion flow, awaiting reminder number.
     AwaitingReminderDeletion,
     /// User is in channel subscription deletion flow, awaiting subscription number.

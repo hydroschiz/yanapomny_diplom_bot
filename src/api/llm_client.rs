@@ -23,18 +23,18 @@ impl LlmClient {
     }
 
     /// Create a new LLM client from environment variables.
-    /// 
+    ///
     /// Uses `LLM_API_URL` env var, defaults to `http://localhost:8080`.
     pub fn from_env() -> Result<Self> {
-        let base_url = std::env::var("LLM_API_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let base_url =
+            std::env::var("LLM_API_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
         let timeout = Self::timeout_from_env();
-        
+
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .context("Failed to build HTTP client")?;
-        
+
         Ok(Self { client, base_url })
     }
 
@@ -45,7 +45,7 @@ impl LlmClient {
             .timeout(timeout)
             .build()
             .context("Failed to build HTTP client")?;
-        
+
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -53,57 +53,58 @@ impl LlmClient {
     }
 
     /// Parse a reminder from natural language text.
-    /// 
+    ///
     /// Sends the text to LLM API and returns a structured reminder.
     /// Includes user's timezone and current datetime for context.
     pub async fn parse_reminder(
-        &self, 
-        text: &str, 
+        &self,
+        text: &str,
         user_timezone: &str,
         user_datetime: &str,
     ) -> Result<ReminderResponse> {
         let url = format!("{}/api/v1/parse-reminder", self.base_url);
-        
+
         let request = ParseReminderRequest::with_context(
-            text, 
-            user_timezone.to_string(), 
-            user_datetime.to_string()
+            text,
+            user_timezone.to_string(),
+            user_datetime.to_string(),
         );
-        
+
         debug!(url = %url, text = %text, timezone = %user_timezone, "Sending parse request to LLM API");
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .json(&request)
             .send()
             .await
             .context("Failed to send request to LLM API")?;
-        
+
         let status = response.status();
-        
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
             warn!(status = %status, error = %error_text, "LLM API returned error");
             anyhow::bail!("LLM API error: {} - {}", status, error_text);
         }
-        
+
         let reminder_response: ReminderResponse = response
             .json()
             .await
             .context("Failed to parse LLM API response")?;
-        
+
         debug!(
             status = %reminder_response.status,
             "Received response from LLM API"
         );
-        
+
         Ok(reminder_response)
     }
 
     /// Check if the LLM API is available.
     pub async fn health_check(&self) -> Result<bool> {
         let url = format!("{}/api/v1/health", self.base_url);
-        
+
         match self.client.get(&url).send().await {
             Ok(response) => Ok(response.status().is_success()),
             Err(_) => Ok(false),

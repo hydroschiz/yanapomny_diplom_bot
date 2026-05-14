@@ -107,7 +107,10 @@ mod tests {
 
     #[test]
     fn test_plain_text_passthrough() {
-        assert_eq!(strip_html("Обычный текст без тегов"), "Обычный текст без тегов");
+        assert_eq!(
+            strip_html("Обычный текст без тегов"),
+            "Обычный текст без тегов"
+        );
     }
 
     #[test]
@@ -124,9 +127,9 @@ mod tests {
 
     #[test]
     fn test_message_with_link() {
-        let html = r#"Оплачивая, вы <a href="https://telegra.ph/agreement">принимаете условия</a>."#;
+        let html =
+            r#"Оплачивая, вы <a href="https://telegra.ph/agreement">принимаете условия</a>."#;
         let expected = "Оплачивая, вы принимаете условия (https://telegra.ph/agreement).";
         assert_eq!(strip_html(html), expected);
     }
 }
-

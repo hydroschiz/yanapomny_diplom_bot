@@ -43,7 +43,11 @@ pub async fn handle_profile_command_transport<T: BotTransport>(
 /// Временный Telegram entrypoint до переключения app/router на VK.
 pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
     let peer_id = msg.chat.id.0;
-    let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(peer_id);
+    let user_id = msg
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(peer_id);
     let nickname = msg
         .from
         .as_ref()
@@ -142,7 +146,9 @@ async fn send_html_with_keyboard<T: BotTransport>(
     keyboard: &TransportKeyboard,
 ) -> HandlerResult {
     let text = strip_html(text);
-    transport.send_with_keyboard(peer_id, &text, keyboard).await?;
+    transport
+        .send_with_keyboard(peer_id, &text, keyboard)
+        .await?;
     Ok(())
 }
 

@@ -350,13 +350,22 @@ impl HarnessSession {
             tokio::runtime::Handle::current().block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(8),
-                    schema.dispatch(dptree::deps![update, bot, me, config, storage, db, payment_svc]),
+                    schema.dispatch(dptree::deps![
+                        update,
+                        bot,
+                        me,
+                        config,
+                        storage,
+                        db,
+                        payment_svc
+                    ]),
                 )
                 .await
             })
         });
 
-        let outcome = outcome.map_err(|_| anyhow::anyhow!("synthetic update dispatch timed out"))?;
+        let outcome =
+            outcome.map_err(|_| anyhow::anyhow!("synthetic update dispatch timed out"))?;
 
         if outcome.is_continue() {
             warn!("synthetic update did not match any bot handler");
@@ -434,7 +443,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_llm_stub_server(port: u16, state: Option<Arc<Mutex<LlmStubState>>>) -> anyhow::Result<()> {
+async fn run_llm_stub_server(
+    port: u16,
+    state: Option<Arc<Mutex<LlmStubState>>>,
+) -> anyhow::Result<()> {
     let state = state.unwrap_or_else(|| Arc::new(Mutex::new(LlmStubState::default())));
     let router = llm_stub_router(state);
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
@@ -738,14 +750,17 @@ fn handle_telegram_method(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let entry = state.messages.entry(message_id).or_insert_with(|| TelegramStoredMessage {
-                message_id,
-                chat_id,
-                text: String::new(),
-                reply_markup: None,
-                parse_mode: None,
-                deleted: false,
-            });
+            let entry = state
+                .messages
+                .entry(message_id)
+                .or_insert_with(|| TelegramStoredMessage {
+                    message_id,
+                    chat_id,
+                    text: String::new(),
+                    reply_markup: None,
+                    parse_mode: None,
+                    deleted: false,
+                });
             entry.text = text.clone();
             entry.reply_markup = payload.get("reply_markup").cloned();
             entry.deleted = false;
@@ -911,10 +926,19 @@ async fn run_suite() -> anyhow::Result<()> {
 
     write_smoke_results(&ctx, &smoke)?;
     write_functional_results(&ctx, &functional)?;
-    write_simple_result_csv(&ctx.paths.results.join("integration_results.csv"), &integration)?;
+    write_simple_result_csv(
+        &ctx.paths.results.join("integration_results.csv"),
+        &integration,
+    )?;
     write_simple_result_csv(&ctx.paths.results.join("reminder_results.csv"), &reminder)?;
-    write_simple_result_csv(&ctx.paths.results.join("resilience_results.csv"), &resilience)?;
-    write_simple_result_csv(&ctx.paths.results.join("operational_results.csv"), &operational)?;
+    write_simple_result_csv(
+        &ctx.paths.results.join("resilience_results.csv"),
+        &resilience,
+    )?;
+    write_simple_result_csv(
+        &ctx.paths.results.join("operational_results.csv"),
+        &operational,
+    )?;
     write_performance_results(&ctx, &performance)?;
     write_string(
         &ctx.paths.results.join("performance_summary.md"),
@@ -1031,7 +1055,9 @@ async fn clear_database(db: &Db) -> anyhow::Result<()> {
         .await?;
     db.records().delete_many(doc! {}, None).await?;
     db.transactions().delete_many(doc! {}, None).await?;
-    db.channel_subscriptions().delete_many(doc! {}, None).await?;
+    db.channel_subscriptions()
+        .delete_many(doc! {}, None)
+        .await?;
     db.referrals().delete_many(doc! {}, None).await?;
     Ok(())
 }
@@ -1044,7 +1070,12 @@ async fn dump_database(db: &Db) -> anyhow::Result<Value> {
         .await?
         .try_collect()
         .await?;
-    let records: Vec<UserRecord> = db.records().find(doc! {}, None).await?.try_collect().await?;
+    let records: Vec<UserRecord> = db
+        .records()
+        .find(doc! {}, None)
+        .await?
+        .try_collect()
+        .await?;
     let transactions: Vec<Transaction> = db
         .transactions()
         .find(doc! {}, None)
@@ -1057,7 +1088,12 @@ async fn dump_database(db: &Db) -> anyhow::Result<Value> {
         .await?
         .try_collect()
         .await?;
-    let referrals: Vec<Referral> = db.referrals().find(doc! {}, None).await?.try_collect().await?;
+    let referrals: Vec<Referral> = db
+        .referrals()
+        .find(doc! {}, None)
+        .await?
+        .try_collect()
+        .await?;
 
     Ok(json!({
         "users": users,
@@ -1405,7 +1441,10 @@ fn build_architecture_review() -> String {
 fn build_defects(functional: &[FunctionalResult], integration: &[CsvResult]) -> Vec<DefectRecord> {
     let mut defects = Vec::new();
 
-    if functional.iter().any(|result| result.test_id == "F-03" && result.status == "Failed") {
+    if functional
+        .iter()
+        .any(|result| result.test_id == "F-03" && result.status == "Failed")
+    {
         defects.push(DefectRecord {
             defect_id: "D-001".to_string(),
             summary: "New user cannot create reminders after /start because subscription record is not provisioned".to_string(),
@@ -1463,9 +1502,7 @@ fn build_defects(functional: &[FunctionalResult], integration: &[CsvResult]) -> 
 async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>> {
     let mut results = Vec::new();
     let build_log = ctx.paths.logs.join("smoke").join("build.log");
-    let build_output = Command::new("cargo")
-        .args(["build", "--bins"])
-        .output()?;
+    let build_output = Command::new("cargo").args(["build", "--bins"]).output()?;
     write_string(
         &build_log,
         &format!(
@@ -1530,10 +1567,18 @@ async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>
         test_id: "S-05".to_string(),
         preconditions: "Payment flows are excluded from scope.".to_string(),
         steps: "Assess whether Redis is mandatory for core reminder startup.".to_string(),
-        expected_result: "If Redis is obligatory, connectivity must pass; otherwise document non-applicability.".to_string(),
-        actual_result: "Redis not required for covered reminder scenarios; not started.".to_string(),
+        expected_result:
+            "If Redis is obligatory, connectivity must pass; otherwise document non-applicability."
+                .to_string(),
+        actual_result: "Redis not required for covered reminder scenarios; not started."
+            .to_string(),
         status: "Not Testable".to_string(),
-        evidence_path: ctx.paths.root.join("02_environment_setup.md").display().to_string(),
+        evidence_path: ctx
+            .paths
+            .root
+            .join("02_environment_setup.md")
+            .display()
+            .to_string(),
         error_summary: String::new(),
     });
 
@@ -1545,9 +1590,22 @@ async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>
         steps: "Call `GET /api/v1/health` via `LlmClient::health_check()`.".to_string(),
         expected_result: "LLM stub is reachable.".to_string(),
         actual_result: format!("LLM health check returned {llm_health}."),
-        status: if llm_health { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.stubs.join("llm_stub_spec.md").display().to_string(),
-        error_summary: if llm_health { String::new() } else { "health check failed".to_string() },
+        status: if llm_health {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .stubs
+            .join("llm_stub_spec.md")
+            .display()
+            .to_string(),
+        error_summary: if llm_health {
+            String::new()
+        } else {
+            "health check failed".to_string()
+        },
     });
 
     let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
@@ -1568,7 +1626,8 @@ async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>
         preconditions: "Real binary started during S-02.".to_string(),
         steps: "Observe short runtime after bootstrap.".to_string(),
         expected_result: "Background tasks do not crash immediately.".to_string(),
-        actual_result: "Binary survived the smoke interval and was then stopped by the harness.".to_string(),
+        actual_result: "Binary survived the smoke interval and was then stopped by the harness."
+            .to_string(),
         status: "Passed".to_string(),
         evidence_path: app_log.display().to_string(),
         error_summary: String::new(),
@@ -1581,9 +1640,17 @@ async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>
         steps: "Check `test_artifacts/logs/autotest.log`.".to_string(),
         expected_result: "Logs are written.".to_string(),
         actual_result: format!("autotest.log exists = {}", bot_log_exists),
-        status: if bot_log_exists { "Passed".to_string() } else { "Failed".to_string() },
+        status: if bot_log_exists {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: ctx.paths.logs.join("autotest.log").display().to_string(),
-        error_summary: if bot_log_exists { String::new() } else { "combined log file missing".to_string() },
+        error_summary: if bot_log_exists {
+            String::new()
+        } else {
+            "combined log file missing".to_string()
+        },
     });
 
     let restart_log = ctx.paths.logs.join("smoke").join("app_restart.log");
@@ -1630,7 +1697,11 @@ async fn smoke_start_real_binary(
     if let Some(status) = child.try_wait()? {
         return Ok((
             format!("process exited early with {}", status),
-            if status.success() { "Passed".to_string() } else { "Failed".to_string() },
+            if status.success() {
+                "Passed".to_string()
+            } else {
+                "Failed".to_string()
+            },
             if status.success() {
                 String::new()
             } else {
@@ -1728,7 +1799,10 @@ async fn ensure_active_record(db: &Db, chat_id: i64) -> anyhow::Result<UserRecor
     Ok(record)
 }
 
-async fn bootstrap_active_user(ctx: &AutotestContext, session: &HarnessSession) -> anyhow::Result<()> {
+async fn bootstrap_active_user(
+    ctx: &AutotestContext,
+    session: &HarnessSession,
+) -> anyhow::Result<()> {
     bootstrap_active_user_for_chat(ctx, session, session.chat_id).await
 }
 
@@ -1748,9 +1822,19 @@ async fn bootstrap_user_without_subscription(
     ctx: &AutotestContext,
     session: &HarnessSession,
 ) -> anyhow::Result<()> {
-    session.send_update(build_message_update(1100, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        1100,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(1101, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "UTC+7"))?;
+    session.send_update(build_message_update(
+        1101,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "UTC+7",
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
     let db = Db::connect(&ctx.mongo_uri, Some(&ctx.db_name)).await?;
     db.records()
@@ -1929,9 +2013,9 @@ fn build_callback_update(
                 is_premium: false,
                 added_to_attachment_menu: false,
             },
-            message: Some(teloxide::types::MaybeInaccessibleMessage::Regular(Box::new(
-                callback_message,
-            ))),
+            message: Some(teloxide::types::MaybeInaccessibleMessage::Regular(
+                Box::new(callback_message),
+            )),
             inline_message_id: None,
             chat_instance: format!("ci-{}", chat_id),
             data: Some(data.to_string()),
@@ -1940,15 +2024,17 @@ fn build_callback_update(
     }
 }
 
-async fn current_bot_message(
-    ctx: &AutotestContext,
-    chat_id: i64,
-) -> Option<TelegramStoredMessage> {
-    ctx.telegram_state.lock().await.last_visible_message(chat_id)
+async fn current_bot_message(ctx: &AutotestContext, chat_id: i64) -> Option<TelegramStoredMessage> {
+    ctx.telegram_state
+        .lock()
+        .await
+        .last_visible_message(chat_id)
 }
 
 async fn latest_message_text(ctx: &AutotestContext, chat_id: i64) -> Option<String> {
-    current_bot_message(ctx, chat_id).await.map(|message| message.text)
+    current_bot_message(ctx, chat_id)
+        .await
+        .map(|message| message.text)
 }
 
 async fn wait_for_telegram_requests(
@@ -1976,7 +2062,14 @@ async fn wait_for_telegram_requests_for_chat(
 ) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
-        if ctx.telegram_state.lock().await.visible_messages(chat_id).len() >= min_messages {
+        if ctx
+            .telegram_state
+            .lock()
+            .await
+            .visible_messages(chat_id)
+            .len()
+            >= min_messages
+        {
             return Ok(());
         }
         if started.elapsed() > timeout {
@@ -1987,7 +2080,9 @@ async fn wait_for_telegram_requests_for_chat(
 }
 
 async fn clear_user_reminders(db: &Db, chat_id: i64) -> anyhow::Result<()> {
-    db.reminders().delete_many(doc! { "id": chat_id }, None).await?;
+    db.reminders()
+        .delete_many(doc! { "id": chat_id }, None)
+        .await?;
     Ok(())
 }
 
@@ -2004,7 +2099,12 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     let before = dump_database(&db).await?;
-    session.send_update(build_message_update(1, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        1,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
     let after = dump_database(&db).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-01");
@@ -2027,18 +2127,36 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
             "user_exists={user_exists}, outgoing_requests={}",
             ctx.telegram_state.lock().await.snapshot_requests().len()
         ),
-        status: if user_exists { "Passed".to_string() } else { "Failed".to_string() },
+        status: if user_exists {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if user_exists { String::new() } else { "user document missing".to_string() },
+        error_summary: if user_exists {
+            String::new()
+        } else {
+            "user document missing".to_string()
+        },
     });
     session.shutdown().await;
 
     clear_database(&db).await?;
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(10, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        10,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(11, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "UTC+7"))?;
+    session.send_update(build_message_update(
+        11,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "UTC+7",
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
     let user = db.ensure_user(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-02");
@@ -2055,7 +2173,11 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         expected_db_changes: "user.utc becomes +07:00".to_string(),
         expected_outgoing_messages: "UTC success confirmation".to_string(),
         actual_result: format!("user.utc={}, user.time_zone={}", user.utc, user.time_zone),
-        status: if user.utc == "+07:00" { "Passed".to_string() } else { "Failed".to_string() },
+        status: if user.utc == "+07:00" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
         error_summary: if user.utc == "+07:00" {
             String::new()
@@ -2068,20 +2190,35 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     clear_database(&db).await?;
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(12, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        12,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(13, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "Москва"))?;
+    session.send_update(build_message_update(
+        13,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "Москва",
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
     let user = db.ensure_user(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-02B");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-02B".to_string(),
         preconditions: "/start already invoked".to_string(),
         input_payload: "Москва".to_string(),
         injection_method: "synthetic Update::Message".to_string(),
-        expected_db_changes: "user.time_zone becomes Europe/Moscow and compatibility utc offset is filled".to_string(),
+        expected_db_changes:
+            "user.time_zone becomes Europe/Moscow and compatibility utc offset is filled"
+                .to_string(),
         expected_outgoing_messages: "timezone success confirmation".to_string(),
         actual_result: format!("user.utc={}, user.time_zone={}", user.utc, user.time_zone),
         status: if user.utc == "+03:00" && user.time_zone == "Europe/Moscow" {
@@ -2101,23 +2238,51 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     clear_database(&db).await?;
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(14, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        14,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(15, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "Москва"))?;
+    session.send_update(build_message_update(
+        15,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "Москва",
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
     run_create_reminder_flow(ctx, &session, 16, "AUTOTEST_ONCE_SUCCESS").await?;
-    let reminder = db.get_user_reminders(DEFAULT_CHAT_ID).await?.into_iter().next();
+    let reminder = db
+        .get_user_reminders(DEFAULT_CHAT_ID)
+        .await?
+        .into_iter()
+        .next();
     let user = db.ensure_user(DEFAULT_CHAT_ID).await?;
     let request_count = ctx.telegram_state.lock().await.snapshot_requests().len();
-    session.send_update(build_message_update(19, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/profile"))?;
+    session.send_update(build_message_update(
+        19,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/profile",
+    ))?;
     wait_for_telegram_requests(ctx, request_count + 1, Duration::from_secs(5)).await?;
-    let profile_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let profile_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let expected_time = reminder
-        .map(|reminder| user_local_time(&user, reminder.time).format("%H:%M").to_string())
+        .map(|reminder| {
+            user_local_time(&user, reminder.time)
+                .format("%H:%M")
+                .to_string()
+        })
         .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-02C");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     write_json_pretty(
         &evidence_dir.join("telegram_requests.json"),
         &json!(ctx.telegram_state.lock().await.snapshot_requests()),
@@ -2128,15 +2293,20 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         input_payload: "/profile".to_string(),
         injection_method: "synthetic command".to_string(),
         expected_db_changes: "none".to_string(),
-        expected_outgoing_messages: "profile shows nearest reminder in the saved timezone".to_string(),
+        expected_outgoing_messages: "profile shows nearest reminder in the saved timezone"
+            .to_string(),
         actual_result: profile_text.clone(),
-        status: if profile_text.contains("Ближайшее напоминание") && profile_text.contains(&expected_time) {
+        status: if profile_text.contains("Ближайшее напоминание")
+            && profile_text.contains(&expected_time)
+        {
             "Passed".to_string()
         } else {
             "Failed".to_string()
         },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if profile_text.contains("Ближайшее напоминание") && profile_text.contains(&expected_time) {
+        error_summary: if profile_text.contains("Ближайшее напоминание")
+            && profile_text.contains(&expected_time)
+        {
             String::new()
         } else {
             "profile output did not reflect city-based timezone formatting".to_string()
@@ -2147,13 +2317,30 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     clear_database(&db).await?;
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(20, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/start"))?;
+    session.send_update(build_message_update(
+        20,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/start",
+    ))?;
     wait_for_telegram_requests(ctx, 2, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(21, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "UTC+7"))?;
+    session.send_update(build_message_update(
+        21,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "UTC+7",
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(22, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "AUTOTEST_ONCE_SUCCESS"))?;
+    session.send_update(build_message_update(
+        22,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "AUTOTEST_ONCE_SUCCESS",
+    ))?;
     wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
-    let blocked_message = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let blocked_message = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-03");
     fs::create_dir_all(&evidence_dir)?;
     write_json_pretty(
@@ -2162,10 +2349,13 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     )?;
     results.push(FunctionalResult {
         test_id: "F-03".to_string(),
-        preconditions: "Fresh user after /start and timezone setup, without manual record provisioning.".to_string(),
+        preconditions:
+            "Fresh user after /start and timezone setup, without manual record provisioning."
+                .to_string(),
         input_payload: "AUTOTEST_ONCE_SUCCESS".to_string(),
         injection_method: "synthetic Update::Message".to_string(),
-        expected_db_changes: "confirmed reminder should be creatable for trial/new user".to_string(),
+        expected_db_changes: "confirmed reminder should be creatable for trial/new user"
+            .to_string(),
         expected_outgoing_messages: "text confirmation flow".to_string(),
         actual_result: blocked_message.clone(),
         status: if blocked_message.contains("Подписка не активна") {
@@ -2191,14 +2381,19 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     let record = db.find_record(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-03B");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     write_json_pretty(
         &evidence_dir.join("telegram_requests.json"),
         &json!(ctx.telegram_state.lock().await.snapshot_requests()),
     )?;
     results.push(FunctionalResult {
         test_id: "F-03B".to_string(),
-        preconditions: "Fresh user after /start and timezone setup, without manual record provisioning.".to_string(),
+        preconditions:
+            "Fresh user after /start and timezone setup, without manual record provisioning."
+                .to_string(),
         input_payload: "AUTOTEST_ONCE_SUCCESS + confirm callbacks".to_string(),
         injection_method: "synthetic message + callback sequence".to_string(),
         expected_db_changes: "trial record exists and one active reminder is created".to_string(),
@@ -2206,16 +2401,29 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         actual_result: format!(
             "record_exists={}, active_record={}, reminders={}",
             record.is_some(),
-            record.as_ref().map(|item| item.is_active()).unwrap_or(false),
+            record
+                .as_ref()
+                .map(|item| item.is_active())
+                .unwrap_or(false),
             reminders.len()
         ),
-        status: if record.as_ref().map(|item| item.is_active()).unwrap_or(false) && reminders.len() == 1 {
+        status: if record
+            .as_ref()
+            .map(|item| item.is_active())
+            .unwrap_or(false)
+            && reminders.len() == 1
+        {
             "Passed".to_string()
         } else {
             "Failed".to_string()
         },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if record.as_ref().map(|item| item.is_active()).unwrap_or(false) && reminders.len() == 1 {
+        error_summary: if record
+            .as_ref()
+            .map(|item| item.is_active())
+            .unwrap_or(false)
+            && reminders.len() == 1
+        {
             String::new()
         } else {
             "fresh user still cannot complete reminder creation flow".to_string()
@@ -2232,18 +2440,30 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     let reminders = db.get_user_reminders(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-03A");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-03A".to_string(),
-        preconditions: "Active subscription record provisioned directly in isolated DB.".to_string(),
+        preconditions: "Active subscription record provisioned directly in isolated DB."
+            .to_string(),
         input_payload: "AUTOTEST_ONCE_SUCCESS + confirm callbacks".to_string(),
         injection_method: "synthetic message + callback sequence".to_string(),
         expected_db_changes: "one active reminder record".to_string(),
         expected_outgoing_messages: "text confirm, parsed confirm, success message".to_string(),
         actual_result: format!("active reminders count={}", reminders.len()),
-        status: if reminders.len() == 1 { "Passed".to_string() } else { "Failed".to_string() },
+        status: if reminders.len() == 1 {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if reminders.len() == 1 { String::new() } else { "reminder record missing".to_string() },
+        error_summary: if reminders.len() == 1 {
+            String::new()
+        } else {
+            "reminder record missing".to_string()
+        },
     });
     session.shutdown().await;
 
@@ -2260,7 +2480,10 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         .unwrap_or(false);
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-04");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-04".to_string(),
         preconditions: "Active subscription record.".to_string(),
@@ -2271,9 +2494,16 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         actual_result: format!(
             "reminders={}, recurring_delay={}",
             reminders.len(),
-            reminders.first().map(|r| r.delay.clone()).unwrap_or_default()
+            reminders
+                .first()
+                .map(|r| r.delay.clone())
+                .unwrap_or_default()
         ),
-        status: if recurring_ok { "Passed".to_string() } else { "Failed".to_string() },
+        status: if recurring_ok {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
         error_summary: if recurring_ok {
             String::new()
@@ -2285,9 +2515,16 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
 
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(60, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/list"))?;
+    session.send_update(build_message_update(
+        60,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/list",
+    ))?;
     wait_for_telegram_requests(ctx, 1, Duration::from_secs(5)).await?;
-    let list_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let list_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-05");
     fs::create_dir_all(&evidence_dir)?;
     write_json_pretty(
@@ -2302,13 +2539,15 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         expected_db_changes: "none".to_string(),
         expected_outgoing_messages: "formatted reminder list".to_string(),
         actual_result: list_text.clone(),
-        status: if list_text.contains("автотест повторяющееся напоминание") {
+        status: if list_text.contains("автотест повторяющееся напоминание")
+        {
             "Passed".to_string()
         } else {
             "Failed".to_string()
         },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if list_text.contains("автотест повторяющееся напоминание") {
+        error_summary: if list_text.contains("автотест повторяющееся напоминание")
+        {
             String::new()
         } else {
             "list output missing created reminder".to_string()
@@ -2331,17 +2570,35 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
 
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
-    session.send_update(build_message_update(70, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/list"))?;
+    session.send_update(build_message_update(
+        70,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/list",
+    ))?;
     wait_for_telegram_requests(ctx, 1, Duration::from_secs(5)).await?;
     let list_message = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-    session.send_update(build_callback_update(71, DEFAULT_CHAT_ID, "reminder_delete_start", &list_message))?;
+    session.send_update(build_callback_update(
+        71,
+        DEFAULT_CHAT_ID,
+        "reminder_delete_start",
+        &list_message,
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
-    session.send_update(build_message_update(72, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "1"))?;
+    session.send_update(build_message_update(
+        72,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "1",
+    ))?;
     wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
     let reminders_after_delete = db.get_user_reminders(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-07");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-07".to_string(),
         preconditions: "Reminder list contains at least one reminder.".to_string(),
@@ -2398,7 +2655,10 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     let exists_after_done = db.find_reminder(one_time.rem_id.unwrap()).await?.is_some();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-08");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-08".to_string(),
         preconditions: "One due one-time reminder has been delivered.".to_string(),
@@ -2407,7 +2667,11 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         expected_db_changes: "delivered one-time reminder removed".to_string(),
         expected_outgoing_messages: "message edited to completed state".to_string(),
         actual_result: format!("exists_after_done={}", exists_after_done),
-        status: if !exists_after_done { "Passed".to_string() } else { "Failed".to_string() },
+        status: if !exists_after_done {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
         error_summary: if !exists_after_done {
             String::new()
@@ -2437,7 +2701,11 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     )
     .await?;
     let sent_message = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-    let old_time = db.find_reminder(snooze_reminder.rem_id.unwrap()).await?.unwrap().time;
+    let old_time = db
+        .find_reminder(snooze_reminder.rem_id.unwrap())
+        .await?
+        .unwrap()
+        .time;
     session.send_update(build_callback_update(
         81,
         DEFAULT_CHAT_ID,
@@ -2445,10 +2713,17 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         &sent_message,
     ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
-    let new_time = db.find_reminder(snooze_reminder.rem_id.unwrap()).await?.unwrap().time;
+    let new_time = db
+        .find_reminder(snooze_reminder.rem_id.unwrap())
+        .await?
+        .unwrap()
+        .time;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-09");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-09".to_string(),
         preconditions: "One due reminder has been delivered.".to_string(),
@@ -2457,7 +2732,11 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         expected_db_changes: "reminder time shifted forward".to_string(),
         expected_outgoing_messages: "message edited to snoozed state".to_string(),
         actual_result: format!("old_time={}, new_time={}", old_time, new_time),
-        status: if new_time > old_time { "Passed".to_string() } else { "Failed".to_string() },
+        status: if new_time > old_time {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
         error_summary: if new_time > old_time {
             String::new()
@@ -2472,15 +2751,28 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     bootstrap_active_user(ctx, &session).await?;
-    session.send_update(build_message_update(90, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "AUTOTEST_ONCE_SUCCESS"))?;
+    session.send_update(build_message_update(
+        90,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "AUTOTEST_ONCE_SUCCESS",
+    ))?;
     wait_for_telegram_requests(ctx, 1, Duration::from_secs(5)).await?;
     let confirm_msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-    session.send_update(build_callback_update(91, DEFAULT_CHAT_ID, "text_cancel", &confirm_msg))?;
+    session.send_update(build_callback_update(
+        91,
+        DEFAULT_CHAT_ID,
+        "text_cancel",
+        &confirm_msg,
+    ))?;
     wait_for_telegram_requests(ctx, 3, Duration::from_secs(5)).await?;
     let reminders_after_cancel = db.get_user_reminders(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-10");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(FunctionalResult {
         test_id: "F-10".to_string(),
         preconditions: "Active subscription record.".to_string(),
@@ -2508,13 +2800,30 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     ensure_active_record(&db, DEFAULT_CHAT_ID).await?;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     bootstrap_active_user(ctx, &session).await?;
-    session.send_update(build_message_update(100, DEFAULT_CHAT_ID, DEFAULT_USER_ID, ""))?;
+    session.send_update(build_message_update(
+        100,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "",
+    ))?;
     sleep(Duration::from_millis(500)).await;
-    session.send_update(build_message_update(101, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "AUTOTEST_AMBIG"))?;
+    session.send_update(build_message_update(
+        101,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "AUTOTEST_AMBIG",
+    ))?;
     wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
-    let ambiguous_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let ambiguous_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let state_msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-    session.send_update(build_callback_update(102, DEFAULT_CHAT_ID, "reminder_confirm", &state_msg))?;
+    session.send_update(build_callback_update(
+        102,
+        DEFAULT_CHAT_ID,
+        "reminder_confirm",
+        &state_msg,
+    ))?;
     wait_for_telegram_requests(ctx, 5, Duration::from_secs(5)).await?;
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-11");
     fs::create_dir_all(&evidence_dir)?;
@@ -2525,7 +2834,9 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     results.push(FunctionalResult {
         test_id: "F-11".to_string(),
         preconditions: "Active subscription record.".to_string(),
-        input_payload: "empty text, ambiguous text, invalid reminder_confirm callback in wrong state".to_string(),
+        input_payload:
+            "empty text, ambiguous text, invalid reminder_confirm callback in wrong state"
+                .to_string(),
         injection_method: "synthetic messages + callback".to_string(),
         expected_db_changes: "no reminder created; bot remains stable".to_string(),
         expected_outgoing_messages: "error/diagnostic response for ambiguous parse".to_string(),
@@ -2552,9 +2863,16 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     bootstrap_user_without_subscription(ctx, &session).await?;
-    session.send_update(build_message_update(110, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "AUTOTEST_ONCE_SUCCESS"))?;
+    session.send_update(build_message_update(
+        110,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "AUTOTEST_ONCE_SUCCESS",
+    ))?;
     wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
-    let gate_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let gate_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-12");
     fs::create_dir_all(&evidence_dir)?;
     write_json_pretty(
@@ -2588,9 +2906,16 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
     reset_stub_state(ctx).await;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     bootstrap_active_user(ctx, &session).await?;
-    session.send_update(build_message_update(120, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/profile"))?;
+    session.send_update(build_message_update(
+        120,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/profile",
+    ))?;
     wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
-    let profile_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let profile_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("functional").join("F-13");
     fs::create_dir_all(&evidence_dir)?;
     write_json_pretty(
@@ -2635,43 +2960,83 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
     let reminders = db.get_user_reminders(DEFAULT_CHAT_ID).await?;
     let evidence_dir = ctx.paths.evidence.join("integration").join("I-01");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(CsvResult {
         test_id: "I-01".to_string(),
         preconditions: "Active user.".to_string(),
         steps: "Create reminder through full handler flow and inspect DB.".to_string(),
         expected_result: "CRUD path through bot + DB succeeds.".to_string(),
         actual_result: format!("reminders_in_db={}", reminders.len()),
-        status: if reminders.len() == 1 { "Passed".to_string() } else { "Failed".to_string() },
+        status: if reminders.len() == 1 {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if reminders.len() == 1 { String::new() } else { "DB did not persist reminder".to_string() },
+        error_summary: if reminders.len() == 1 {
+            String::new()
+        } else {
+            "DB did not persist reminder".to_string()
+        },
     });
     session.shutdown().await;
 
     for (test_id, text, expected) in [
-        ("I-02-success", "AUTOTEST_ONCE_SUCCESS", "Напоминание создано"),
-        ("I-02-success-recurring", "AUTOTEST_RECUR_SUCCESS", "Напоминание создано"),
+        (
+            "I-02-success",
+            "AUTOTEST_ONCE_SUCCESS",
+            "Напоминание создано",
+        ),
+        (
+            "I-02-success-recurring",
+            "AUTOTEST_RECUR_SUCCESS",
+            "Напоминание создано",
+        ),
         ("I-02-ambiguous", "AUTOTEST_AMBIG", "Не удалось распознать"),
         ("I-02-http500", "AUTOTEST_HTTP500", "Не удалось обработать"),
         ("I-02-timeout", "AUTOTEST_TIMEOUT", "Не удалось обработать"),
-        ("I-02-invalid-json", "AUTOTEST_INVALID_JSON", "Не удалось обработать"),
+        (
+            "I-02-invalid-json",
+            "AUTOTEST_INVALID_JSON",
+            "Не удалось обработать",
+        ),
     ] {
         clear_database(&db).await?;
         ensure_active_record(&db, DEFAULT_CHAT_ID).await?;
         reset_stub_state(ctx).await;
         let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
         bootstrap_active_user(ctx, &session).await?;
-        session.send_update(build_message_update(300, DEFAULT_CHAT_ID, DEFAULT_USER_ID, text))?;
+        session.send_update(build_message_update(
+            300,
+            DEFAULT_CHAT_ID,
+            DEFAULT_USER_ID,
+            text,
+        ))?;
         wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
         let msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-        session.send_update(build_callback_update(301, DEFAULT_CHAT_ID, "text_confirm", &msg))?;
+        session.send_update(build_callback_update(
+            301,
+            DEFAULT_CHAT_ID,
+            "text_confirm",
+            &msg,
+        ))?;
         wait_for_telegram_requests(ctx, 7, Duration::from_secs(5)).await?;
         if text.contains("SUCCESS") {
             let msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-            session.send_update(build_callback_update(302, DEFAULT_CHAT_ID, "reminder_confirm", &msg))?;
+            session.send_update(build_callback_update(
+                302,
+                DEFAULT_CHAT_ID,
+                "reminder_confirm",
+                &msg,
+            ))?;
             wait_for_telegram_requests(ctx, 10, Duration::from_secs(5)).await?;
         }
-        let latest = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+        let latest = latest_message_text(ctx, DEFAULT_CHAT_ID)
+            .await
+            .unwrap_or_default();
         let evidence_dir = ctx.paths.evidence.join("integration").join(test_id);
         fs::create_dir_all(&evidence_dir)?;
         write_json_pretty(
@@ -2688,9 +3053,17 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
             steps: format!("Run reminder creation flow with `{text}`."),
             expected_result: expected.to_string(),
             actual_result: latest.clone(),
-            status: if latest.contains(expected) { "Passed".to_string() } else { "Failed".to_string() },
+            status: if latest.contains(expected) {
+                "Passed".to_string()
+            } else {
+                "Failed".to_string()
+            },
             evidence_path: evidence_dir.display().to_string(),
-            error_summary: if latest.contains(expected) { String::new() } else { "unexpected LLM integration behaviour".to_string() },
+            error_summary: if latest.contains(expected) {
+                String::new()
+            } else {
+                "unexpected LLM integration behaviour".to_string()
+            },
         });
         session.shutdown().await;
     }
@@ -2717,7 +3090,10 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
     let updated = db.find_reminder(reminder.rem_id.unwrap()).await?;
     let evidence_dir = ctx.paths.evidence.join("integration").join("I-03");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&db).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&db).await?,
+    )?;
     results.push(CsvResult {
         test_id: "I-03".to_string(),
         preconditions: "Due recurring reminder exists.".to_string(),
@@ -2740,7 +3116,9 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
         },
     });
 
-    let sent_text = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let sent_text = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     let evidence_dir = ctx.paths.evidence.join("integration").join("I-04");
     fs::create_dir_all(&evidence_dir)?;
     write_json_pretty(
@@ -2763,10 +3141,19 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
         test_id: "I-05".to_string(),
         preconditions: "Suite env vars already set.".to_string(),
         steps: "Call `Config::from_env()`.".to_string(),
-        expected_result: "Runtime config derives from env rather than hardcoded secrets.".to_string(),
-        actual_result: format!("mongo_uri={}, bot_username={}", config.mongo_uri, config.bot_username),
+        expected_result: "Runtime config derives from env rather than hardcoded secrets."
+            .to_string(),
+        actual_result: format!(
+            "mongo_uri={}, bot_username={}",
+            config.mongo_uri, config.bot_username
+        ),
         status: "Passed".to_string(),
-        evidence_path: ctx.paths.root.join("02_environment_setup.md").display().to_string(),
+        evidence_path: ctx
+            .paths
+            .root
+            .join("02_environment_setup.md")
+            .display()
+            .to_string(),
         error_summary: String::new(),
     });
 
@@ -2787,19 +3174,33 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
         })
         .await?;
     let reconnected = Db::connect(&ctx.mongo_uri, Some(&ctx.db_name)).await?;
-    let restored = reconnected.find_reminder(reminder.rem_id.unwrap()).await?.is_some();
+    let restored = reconnected
+        .find_reminder(reminder.rem_id.unwrap())
+        .await?
+        .is_some();
     let evidence_dir = ctx.paths.evidence.join("integration").join("I-06");
     fs::create_dir_all(&evidence_dir)?;
-    write_json_pretty(&evidence_dir.join("db_after.json"), &dump_database(&reconnected).await?)?;
+    write_json_pretty(
+        &evidence_dir.join("db_after.json"),
+        &dump_database(&reconnected).await?,
+    )?;
     results.push(CsvResult {
         test_id: "I-06".to_string(),
         preconditions: "Confirmed future reminder exists.".to_string(),
         steps: "Reconnect DB after simulated restart.".to_string(),
         expected_result: "Confirmed data persists across reconnect/restart.".to_string(),
         actual_result: format!("restored={restored}"),
-        status: if restored { "Passed".to_string() } else { "Failed".to_string() },
+        status: if restored {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: evidence_dir.display().to_string(),
-        error_summary: if restored { String::new() } else { "confirmed reminder not found after reconnect".to_string() },
+        error_summary: if restored {
+            String::new()
+        } else {
+            "confirmed reminder not found after reconnect".to_string()
+        },
     });
 
     Ok(results)
@@ -2831,9 +3232,19 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         preconditions: "Fresh reminder insert.".to_string(),
         steps: "Persist reminder and inspect due time.".to_string(),
         expected_result: "Nearest trigger is stored immediately.".to_string(),
-        actual_result: format!("rem_id={}, due_time={}", reminder.rem_id.unwrap(), reminder.time),
+        actual_result: format!(
+            "rem_id={}, due_time={}",
+            reminder.rem_id.unwrap(),
+            reminder.time
+        ),
         status: "Passed".to_string(),
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-01").display().to_string(),
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-01")
+            .display()
+            .to_string(),
         error_summary: String::new(),
     });
 
@@ -2862,9 +3273,23 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         steps: "Run scheduler once.".to_string(),
         expected_result: "Reminder is sent and marked sent.".to_string(),
         actual_result: format!("status_after_send={}", sent.status),
-        status: if sent.status == "sent" { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-02").display().to_string(),
-        error_summary: if sent.status == "sent" { String::new() } else { "one-time reminder did not transition to sent".to_string() },
+        status: if sent.status == "sent" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-02")
+            .display()
+            .to_string(),
+        error_summary: if sent.status == "sent" {
+            String::new()
+        } else {
+            "one-time reminder did not transition to sent".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -2897,7 +3322,13 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         } else {
             "Failed".to_string()
         },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-03").display().to_string(),
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-03")
+            .display()
+            .to_string(),
         error_summary: if updated.status == "active" && updated.time > reminder.time {
             String::new()
         } else {
@@ -2931,13 +3362,22 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         preconditions: "One due one-time reminder exists.".to_string(),
         steps: "Run scheduler twice.".to_string(),
         expected_result: "Reminder is not sent twice in normal path.".to_string(),
-        actual_result: format!("requests_first={}, requests_second={}", request_count_after_first, request_count_after_second),
+        actual_result: format!(
+            "requests_first={}, requests_second={}",
+            request_count_after_first, request_count_after_second
+        ),
         status: if request_count_after_first == request_count_after_second {
             "Passed".to_string()
         } else {
             "Failed".to_string()
         },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-04").display().to_string(),
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-04")
+            .display()
+            .to_string(),
         error_summary: if request_count_after_first == request_count_after_second {
             String::new()
         } else {
@@ -2962,19 +3402,39 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
             retry_at: None,
         })
         .await?;
-    db.delete_reminder(DEFAULT_CHAT_ID, reminder.rem_id.unwrap()).await?;
+    db.delete_reminder(DEFAULT_CHAT_ID, reminder.rem_id.unwrap())
+        .await?;
     reset_stub_state(ctx).await;
     scheduler::process_due_reminders_once(&bot, &db).await?;
-    let no_messages = ctx.telegram_state.lock().await.snapshot_requests().is_empty();
+    let no_messages = ctx
+        .telegram_state
+        .lock()
+        .await
+        .snapshot_requests()
+        .is_empty();
     results.push(CsvResult {
         test_id: "R-05".to_string(),
         preconditions: "Reminder deleted before due time.".to_string(),
         steps: "Run scheduler after deletion.".to_string(),
         expected_result: "No future trigger fires.".to_string(),
         actual_result: format!("no_messages={no_messages}"),
-        status: if no_messages { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-05").display().to_string(),
-        error_summary: if no_messages { String::new() } else { "scheduler still emitted deleted reminder".to_string() },
+        status: if no_messages {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-05")
+            .display()
+            .to_string(),
+        error_summary: if no_messages {
+            String::new()
+        } else {
+            "scheduler still emitted deleted reminder".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3013,9 +3473,23 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         steps: "Invoke snooze callback.".to_string(),
         expected_result: "New due trigger is scheduled.".to_string(),
         actual_result: format!("old_time={}, new_time={}", old.time, new.time),
-        status: if new.time > old.time { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-06").display().to_string(),
-        error_summary: if new.time > old.time { String::new() } else { "snooze did not create new trigger".to_string() },
+        status: if new.time > old.time {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-06")
+            .display()
+            .to_string(),
+        error_summary: if new.time > old.time {
+            String::new()
+        } else {
+            "snooze did not create new trigger".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3042,9 +3516,23 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         steps: "Reconnect DB after simulated restart.".to_string(),
         expected_result: "Future reminder is restored after restart.".to_string(),
         actual_result: format!("exists_after_restart={exists}"),
-        status: if exists { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-07").display().to_string(),
-        error_summary: if exists { String::new() } else { "future reminder missing after restart".to_string() },
+        status: if exists {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-07")
+            .display()
+            .to_string(),
+        error_summary: if exists {
+            String::new()
+        } else {
+            "future reminder missing after restart".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3063,16 +3551,34 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         })
         .await?;
     let recovered = db.recover_stuck_reminders(300).await?;
-    let recovered_status = db.find_reminder(stuck.rem_id.unwrap()).await?.unwrap().status;
+    let recovered_status = db
+        .find_reminder(stuck.rem_id.unwrap())
+        .await?
+        .unwrap()
+        .status;
     results.push(CsvResult {
         test_id: "R-08".to_string(),
         preconditions: "Reminder is stuck in processing state.".to_string(),
         steps: "Call `recover_stuck_reminders`.".to_string(),
         expected_result: "Reminder status returns to active.".to_string(),
         actual_result: format!("recovered_count={}, status={}", recovered, recovered_status),
-        status: if recovered_status == "active" { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-08").display().to_string(),
-        error_summary: if recovered_status == "active" { String::new() } else { "processing reminder was not recovered".to_string() },
+        status: if recovered_status == "active" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-08")
+            .display()
+            .to_string(),
+        error_summary: if recovered_status == "active" {
+            String::new()
+        } else {
+            "processing reminder was not recovered".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3109,10 +3615,27 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         preconditions: "Stub transport returns temporary 500 once.".to_string(),
         steps: "Run scheduler on due reminder.".to_string(),
         expected_result: "Reminder moves to retry/backoff state.".to_string(),
-        actual_result: format!("status={}, retry_count={}, retry_at={:?}", retry_record.status, retry_record.retry_count, retry_record.retry_at),
-        status: if retry_record.status == "retry" { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-09").display().to_string(),
-        error_summary: if retry_record.status == "retry" { String::new() } else { "temporary failure did not schedule retry".to_string() },
+        actual_result: format!(
+            "status={}, retry_count={}, retry_at={:?}",
+            retry_record.status, retry_record.retry_count, retry_record.retry_at
+        ),
+        status: if retry_record.status == "retry" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-09")
+            .display()
+            .to_string(),
+        error_summary: if retry_record.status == "retry" {
+            String::new()
+        } else {
+            "temporary failure did not schedule retry".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3150,9 +3673,23 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         steps: "Run scheduler on due reminder.".to_string(),
         expected_result: "Reminder is marked failed.".to_string(),
         actual_result: format!("status={}", failed_record.status),
-        status: if failed_record.status == "failed" { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("reminders").join("R-10").display().to_string(),
-        error_summary: if failed_record.status == "failed" { String::new() } else { "permanent failure did not mark reminder failed".to_string() },
+        status: if failed_record.status == "failed" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("reminders")
+            .join("R-10")
+            .display()
+            .to_string(),
+        error_summary: if failed_record.status == "failed" {
+            String::new()
+        } else {
+            "permanent failure did not mark reminder failed".to_string()
+        },
     });
 
     Ok(results)
@@ -3173,25 +3710,48 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
         reset_stub_state(ctx).await;
         let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
         bootstrap_active_user(ctx, &session).await?;
-        session.send_update(build_message_update(500, DEFAULT_CHAT_ID, DEFAULT_USER_ID, text))?;
+        session.send_update(build_message_update(
+            500,
+            DEFAULT_CHAT_ID,
+            DEFAULT_USER_ID,
+            text,
+        ))?;
         wait_for_telegram_requests(ctx, 4, Duration::from_secs(5)).await?;
         let msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
-        session.send_update(build_callback_update(501, DEFAULT_CHAT_ID, "text_confirm", &msg))?;
+        session.send_update(build_callback_update(
+            501,
+            DEFAULT_CHAT_ID,
+            "text_confirm",
+            &msg,
+        ))?;
         wait_for_telegram_requests(ctx, 7, Duration::from_secs(5)).await?;
-        let latest = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+        let latest = latest_message_text(ctx, DEFAULT_CHAT_ID)
+            .await
+            .unwrap_or_default();
         results.push(CsvResult {
             test_id: test_id.to_string(),
             preconditions: "Active user; stub LLM configured for error path.".to_string(),
             steps: format!("Run reminder creation flow with `{text}`."),
-            expected_result: "Bot should not crash and should emit diagnostic response.".to_string(),
+            expected_result: "Bot should not crash and should emit diagnostic response."
+                .to_string(),
             actual_result: latest.clone(),
-            status: if latest.contains("Не удалось обработать") || latest.contains("Не удалось распознать") {
+            status: if latest.contains("Не удалось обработать")
+                || latest.contains("Не удалось распознать")
+            {
                 "Passed".to_string()
             } else {
                 "Failed".to_string()
             },
-            evidence_path: ctx.paths.evidence.join("resilience").join(test_id).display().to_string(),
-            error_summary: if latest.contains("Не удалось обработать") || latest.contains("Не удалось распознать") {
+            evidence_path: ctx
+                .paths
+                .evidence
+                .join("resilience")
+                .join(test_id)
+                .display()
+                .to_string(),
+            error_summary: if latest.contains("Не удалось обработать")
+                || latest.contains("Не удалось распознать")
+            {
                 String::new()
             } else {
                 "expected diagnostic message missing".to_string()
@@ -3201,7 +3761,11 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
     }
 
     stop_mongo_container().await?;
-    let startup_log = ctx.paths.logs.join("resilience").join("db_startup_failure.log");
+    let startup_log = ctx
+        .paths
+        .logs
+        .join("resilience")
+        .join("db_startup_failure.log");
     let stdout = File::create(&startup_log)?;
     let stderr = stdout.try_clone()?;
     let mut child = Command::new("target/debug/yanapomnyu_bot")
@@ -3239,7 +3803,11 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
         steps: "Start real bot binary.".to_string(),
         expected_result: "Startup fails loudly and diagnostically.".to_string(),
         actual_result: format!("exit_status={:?}", status),
-        status: if startup_failed_loudly { "Passed".to_string() } else { "Failed".to_string() },
+        status: if startup_failed_loudly {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
         evidence_path: startup_log.display().to_string(),
         error_summary: if startup_failed_loudly {
             String::new()
@@ -3254,22 +3822,34 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     bootstrap_active_user(ctx, &session).await?;
     stop_mongo_container().await?;
-    let dispatch_outcome = session.send_update(build_message_update(520, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/list"));
+    let dispatch_outcome = session.send_update(build_message_update(
+        520,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/list",
+    ));
     sleep(Duration::from_secs(2)).await;
-    let after = latest_message_text(ctx, DEFAULT_CHAT_ID).await.unwrap_or_default();
+    let after = latest_message_text(ctx, DEFAULT_CHAT_ID)
+        .await
+        .unwrap_or_default();
     results.push(CsvResult {
         test_id: "X-06".to_string(),
         preconditions: "MongoDB stopped after session bootstrap.".to_string(),
         steps: "Invoke `/list` while DB is unavailable.".to_string(),
         expected_result: "Operation should not be treated as successful.".to_string(),
-        actual_result: format!("dispatch_outcome={:?}; latest_message={after}", dispatch_outcome.as_ref().map(|_| ())),
-        status: if dispatch_outcome.is_err() || !after.contains("Активные напоминания") {
+        actual_result: format!(
+            "dispatch_outcome={:?}; latest_message={after}",
+            dispatch_outcome.as_ref().map(|_| ())
+        ),
+        status: if dispatch_outcome.is_err() || !after.contains("Активные напоминания")
+        {
             "Passed".to_string()
         } else {
             "Failed".to_string()
         },
         evidence_path: ctx.paths.logs.join("autotest.log").display().to_string(),
-        error_summary: if dispatch_outcome.is_err() || !after.contains("Активные напоминания") {
+        error_summary: if dispatch_outcome.is_err() || !after.contains("Активные напоминания")
+        {
             String::new()
         } else {
             "operation appeared successful despite DB outage".to_string()
@@ -3302,9 +3882,23 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
         steps: "Reconnect to DB.".to_string(),
         expected_result: "Confirmed operation survives restart.".to_string(),
         actual_result: format!("exists_after_restart={exists}"),
-        status: if exists { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("resilience").join("X-07").display().to_string(),
-        error_summary: if exists { String::new() } else { "confirmed reminder missing after restart".to_string() },
+        status: if exists {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("resilience")
+            .join("X-07")
+            .display()
+            .to_string(),
+        error_summary: if exists {
+            String::new()
+        } else {
+            "confirmed reminder missing after restart".to_string()
+        },
     });
 
     clear_database(&db).await?;
@@ -3343,9 +3937,23 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
         steps: "Run scheduler once.".to_string(),
         expected_result: "Reminder moves to failed state.".to_string(),
         actual_result: format!("status={}", failed.status),
-        status: if failed.status == "failed" { "Passed".to_string() } else { "Failed".to_string() },
-        evidence_path: ctx.paths.evidence.join("resilience").join("X-08").display().to_string(),
-        error_summary: if failed.status == "failed" { String::new() } else { "max retry reminder did not fail".to_string() },
+        status: if failed.status == "failed" {
+            "Passed".to_string()
+        } else {
+            "Failed".to_string()
+        },
+        evidence_path: ctx
+            .paths
+            .evidence
+            .join("resilience")
+            .join("X-08")
+            .display()
+            .to_string(),
+        error_summary: if failed.status == "failed" {
+            String::new()
+        } else {
+            "max retry reminder did not fail".to_string()
+        },
     });
 
     Ok(results)
@@ -3369,7 +3977,9 @@ async fn run_operational_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
             preconditions: "Autotest run creates runtime dirs as needed.".to_string(),
             steps: "Check that run creates runtime dirs and container from scratch.".to_string(),
             expected_result: "Clean environment start is possible.".to_string(),
-            actual_result: "Mongo container and runtime dirs are created automatically by the suite.".to_string(),
+            actual_result:
+                "Mongo container and runtime dirs are created automatically by the suite."
+                    .to_string(),
             status: "Passed".to_string(),
             evidence_path: ctx.paths.runtime.display().to_string(),
             error_summary: String::new(),
@@ -3379,9 +3989,15 @@ async fn run_operational_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
             preconditions: "Env-based config in place.".to_string(),
             steps: "Review env setup and smoke startup.".to_string(),
             expected_result: "Configuration lives outside code.".to_string(),
-            actual_result: "Runtime setup uses only env vars and no hardcoded live secrets.".to_string(),
+            actual_result: "Runtime setup uses only env vars and no hardcoded live secrets."
+                .to_string(),
             status: "Passed".to_string(),
-            evidence_path: ctx.paths.root.join("02_environment_setup.md").display().to_string(),
+            evidence_path: ctx
+                .paths
+                .root
+                .join("02_environment_setup.md")
+                .display()
+                .to_string(),
             error_summary: String::new(),
         },
         CsvResult {
@@ -3401,7 +4017,13 @@ async fn run_operational_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
             expected_result: "Application can be stopped and raised again.".to_string(),
             actual_result: "Validated by S-10 smoke restart.".to_string(),
             status: "Passed".to_string(),
-            evidence_path: ctx.paths.logs.join("smoke").join("app_restart.log").display().to_string(),
+            evidence_path: ctx
+                .paths
+                .logs
+                .join("smoke")
+                .join("app_restart.log")
+                .display()
+                .to_string(),
             error_summary: String::new(),
         },
         CsvResult {
@@ -3421,7 +4043,12 @@ async fn run_operational_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
             expected_result: "Evidence collected automatically.".to_string(),
             actual_result: "Artifacts are generated by harness without manual steps.".to_string(),
             status: "Passed".to_string(),
-            evidence_path: ctx.paths.root.join("test_execution_report.md").display().to_string(),
+            evidence_path: ctx
+                .paths
+                .root
+                .join("test_execution_report.md")
+                .display()
+                .to_string(),
             error_summary: String::new(),
         },
     ])
@@ -3442,8 +4069,16 @@ async fn run_performance_tests(
     for idx in 0..10 {
         reset_stub_state(ctx).await;
         let started = Instant::now();
-        session.send_update(build_message_update(600 + idx, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/list"))?;
-        if wait_for_telegram_requests(ctx, 1, Duration::from_secs(5)).await.is_ok() {
+        session.send_update(build_message_update(
+            600 + idx,
+            DEFAULT_CHAT_ID,
+            DEFAULT_USER_ID,
+            "/list",
+        ))?;
+        if wait_for_telegram_requests(ctx, 1, Duration::from_secs(5))
+            .await
+            .is_ok()
+        {
             stats.record_success(started.elapsed().as_millis());
         } else {
             stats.record_fail();
@@ -3461,7 +4096,11 @@ async fn run_performance_tests(
         notes: "Simple /list commands without LLM.".to_string(),
         limitations: "Single local process, stubbed Telegram transport.".to_string(),
     });
-    summary.push_str(&format!("- `P-01`: avg={}ms p95={}ms over 10 requests.\n", stats.avg_ms(), stats.percentile(0.95)));
+    summary.push_str(&format!(
+        "- `P-01`: avg={}ms p95={}ms over 10 requests.\n",
+        stats.avg_ms(),
+        stats.percentile(0.95)
+    ));
     session.shutdown().await;
 
     clear_database(&db).await?;
@@ -3472,7 +4111,13 @@ async fn run_performance_tests(
     for idx in 0..5 {
         reset_stub_state(ctx).await;
         let started = Instant::now();
-        run_create_reminder_flow(ctx, &session, 700 + idx as i32 * 10, "AUTOTEST_ONCE_SUCCESS").await?;
+        run_create_reminder_flow(
+            ctx,
+            &session,
+            700 + idx as i32 * 10,
+            "AUTOTEST_ONCE_SUCCESS",
+        )
+        .await?;
         stats.record_success(started.elapsed().as_millis());
         clear_user_reminders(&db, DEFAULT_CHAT_ID).await?;
     }
@@ -3488,7 +4133,11 @@ async fn run_performance_tests(
         notes: "Reminder creation with stub LLM and confirm callbacks.".to_string(),
         limitations: "Human confirmation replaced by immediate synthetic callback.".to_string(),
     });
-    summary.push_str(&format!("- `P-02`: avg={}ms p95={}ms over 5 create flows.\n", stats.avg_ms(), stats.percentile(0.95)));
+    summary.push_str(&format!(
+        "- `P-02`: avg={}ms p95={}ms over 5 create flows.\n",
+        stats.avg_ms(),
+        stats.percentile(0.95)
+    ));
     session.shutdown().await;
 
     clear_database(&db).await?;
@@ -3511,7 +4160,12 @@ async fn run_performance_tests(
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     reset_stub_state(ctx).await;
     let started = Instant::now();
-    session.send_update(build_message_update(800, DEFAULT_CHAT_ID, DEFAULT_USER_ID, "/list"))?;
+    session.send_update(build_message_update(
+        800,
+        DEFAULT_CHAT_ID,
+        DEFAULT_USER_ID,
+        "/list",
+    ))?;
     wait_for_telegram_requests(ctx, 1, Duration::from_secs(5)).await?;
     let elapsed = started.elapsed().as_millis();
     results.push(PerformanceResult {
@@ -3526,7 +4180,10 @@ async fn run_performance_tests(
         notes: "Listing 50 pre-created reminders.".to_string(),
         limitations: "Single measurement.".to_string(),
     });
-    summary.push_str(&format!("- `P-03`: {}ms to render list with 50 reminders.\n", elapsed));
+    summary.push_str(&format!(
+        "- `P-03`: {}ms to render list with 50 reminders.\n",
+        elapsed
+    ));
     session.shutdown().await;
 
     clear_database(&db).await?;
@@ -3563,7 +4220,10 @@ async fn run_performance_tests(
         notes: "Five due reminders processed in one scheduler batch.".to_string(),
         limitations: "Single local batch measurement.".to_string(),
     });
-    summary.push_str(&format!("- `P-04`: {}ms for 5 simultaneous due reminders.\n", elapsed));
+    summary.push_str(&format!(
+        "- `P-04`: {}ms for 5 simultaneous due reminders.\n",
+        elapsed
+    ));
 
     clear_database(&db).await?;
     reset_stub_state(ctx).await;
@@ -3587,12 +4247,18 @@ async fn run_performance_tests(
                 .map_err(|err| err.to_string())?;
             let started = Instant::now();
             session
-                .send_update(build_message_update(900 + idx as i32, chat_id, chat_id, "/list"))
+                .send_update(build_message_update(
+                    900 + idx as i32,
+                    chat_id,
+                    chat_id,
+                    "/list",
+                ))
                 .map_err(|err| err.to_string())?;
-            let outcome = wait_for_telegram_requests_for_chat(&ctx, chat_id, 4, Duration::from_secs(5))
-                .await
-                .map(|_| started.elapsed().as_millis())
-                .map_err(|err| err.to_string());
+            let outcome =
+                wait_for_telegram_requests_for_chat(&ctx, chat_id, 4, Duration::from_secs(5))
+                    .await
+                    .map(|_| started.elapsed().as_millis())
+                    .map_err(|err| err.to_string());
             session.shutdown().await;
             outcome
         }));
@@ -3615,7 +4281,11 @@ async fn run_performance_tests(
         notes: "10 reduced-scale parallel /list operations on separate chats.".to_string(),
         limitations: "Reduced-scale concurrency, local stubs only.".to_string(),
     });
-    summary.push_str(&format!("- `P-05`: avg={}ms p95={}ms across 10 parallel operations.\n", stats.avg_ms(), stats.percentile(0.95)));
+    summary.push_str(&format!(
+        "- `P-05`: avg={}ms p95={}ms across 10 parallel operations.\n",
+        stats.avg_ms(),
+        stats.percentile(0.95)
+    ));
 
     Ok((results, summary))
 }
@@ -3862,7 +4532,11 @@ fn write_test_management_docs(
         }
     }
 
-    let verdict = if failed == 0 && defects.iter().all(|d| d.severity != "High" && d.severity != "Critical") {
+    let verdict = if failed == 0
+        && defects
+            .iter()
+            .all(|d| d.severity != "High" && d.severity != "Critical")
+    {
         "Ready for RC"
     } else if failed <= 2 {
         "Conditionally Ready for RC"

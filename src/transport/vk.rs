@@ -48,11 +48,8 @@ impl VkTransport {
         if token.is_empty() {
             anyhow::bail!("VK access token не может быть пустым");
         }
-        let api = VkApi::new(&token)
-            .map_err(|e| anyhow::anyhow!("VK API init error: {:?}", e))?;
-        Ok(Self {
-            api: Arc::new(api),
-        })
+        let api = VkApi::new(&token).map_err(|e| anyhow::anyhow!("VK API init error: {:?}", e))?;
+        Ok(Self { api: Arc::new(api) })
     }
 
     /// Создать из переменной окружения `VK_ACCESS_TOKEN`.
@@ -129,16 +126,12 @@ impl BotTransport for VkTransport {
             serde_json::json!({
                 "type": "show_snackbar",
                 "text": t
-            }).to_string()
+            })
+            .to_string()
         });
 
         self.api
-            .messages_send_message_event_answer(
-                event_id,
-                user_id,
-                peer_id,
-                event_data.as_deref(),
-            )
+            .messages_send_message_event_answer(event_id, user_id, peer_id, event_data.as_deref())
             .await
             .map_err(|e| anyhow::anyhow!("VK callback answer error: {:?}", e))?;
         Ok(())
@@ -230,8 +223,8 @@ fn create_link_button(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::traits::TransportButton;
+    use super::*;
 
     #[test]
     fn test_convert_empty_keyboard() {
@@ -244,12 +237,10 @@ mod tests {
 
     #[test]
     fn test_convert_keyboard_with_callback_buttons() {
-        let tk = TransportKeyboard::new(vec![
-            vec![
-                TransportButton::callback("Да", "confirm"),
-                TransportButton::callback("Нет", "cancel"),
-            ],
-        ]);
+        let tk = TransportKeyboard::new(vec![vec![
+            TransportButton::callback("Да", "confirm"),
+            TransportButton::callback("Нет", "cancel"),
+        ]]);
         let vk_kb = convert_keyboard(&tk);
         let json = vk_kb.to_json();
         let buttons = json["buttons"].as_array().unwrap();
@@ -259,9 +250,10 @@ mod tests {
 
     #[test]
     fn test_convert_keyboard_with_url_buttons() {
-        let tk = TransportKeyboard::new(vec![
-            vec![TransportButton::url("Открыть", "https://example.com")],
-        ]);
+        let tk = TransportKeyboard::new(vec![vec![TransportButton::url(
+            "Открыть",
+            "https://example.com",
+        )]]);
         let vk_kb = convert_keyboard(&tk);
         let json = vk_kb.to_json();
         let buttons = json["buttons"].as_array().unwrap();
@@ -272,7 +264,10 @@ mod tests {
     #[test]
     fn test_convert_keyboard_multiple_rows() {
         let tk = TransportKeyboard::new(vec![
-            vec![TransportButton::callback("A", "a"), TransportButton::callback("B", "b")],
+            vec![
+                TransportButton::callback("A", "a"),
+                TransportButton::callback("B", "b"),
+            ],
             vec![TransportButton::callback("C", "c")],
         ]);
         let vk_kb = convert_keyboard(&tk);
