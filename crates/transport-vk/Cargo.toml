@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 shared = { workspace = true }
 transport-core = { workspace = true }
+serde_json = { workspace = true }

@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 shared = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }

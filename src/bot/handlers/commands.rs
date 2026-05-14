@@ -10,6 +10,8 @@ use crate::bot::{
     router::HandlerResult,
     states::AppState,
 };
+#[cfg(feature = "telegram-legacy")]
+use crate::transport::adapters::reply_markup_from_transport_keyboard;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -214,7 +216,9 @@ async fn command_help(bot: Bot, msg: Message) -> HandlerResult {
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
-        .reply_markup(crate::bot::keyboards::profile_back_keyboard())
+        .reply_markup(reply_markup_from_transport_keyboard(
+            &crate::bot::keyboards::profile_back_keyboard(),
+        ))
         .await?;
 
     Ok(())
@@ -238,7 +242,9 @@ async fn command_yan(bot: Bot, msg: Message) -> HandlerResult {
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(ParseMode::Html)
-        .reply_markup(crate::bot::keyboards::profile_back_keyboard())
+        .reply_markup(reply_markup_from_transport_keyboard(
+            &crate::bot::keyboards::profile_back_keyboard(),
+        ))
         .await?;
 
     Ok(())
@@ -308,7 +314,7 @@ pub async fn command_setup(bot: Bot, msg: Message, dialogue: AppDialogue, db: Db
 
     bot.send_message(msg.chat.id, SETUP_PROMPT)
         .parse_mode(ParseMode::Html)
-        .reply_markup(setup_keyboard())
+        .reply_markup(reply_markup_from_transport_keyboard(&setup_keyboard()))
         .await?;
     Ok(())
 }
@@ -344,7 +350,7 @@ pub async fn start_utc_flow(
 
     bot.send_message(chat_id, text)
         .parse_mode(ParseMode::Html)
-        .reply_markup(utc_keyboard())
+        .reply_markup(reply_markup_from_transport_keyboard(&utc_keyboard()))
         .await?;
 
     Ok(())

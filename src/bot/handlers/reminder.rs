@@ -17,6 +17,8 @@ use crate::bot::keyboards::{
 use crate::bot::router::AppDialogue;
 use crate::bot::router::HandlerResult;
 use crate::bot::states::{AppState, PendingReminder, PendingText};
+#[cfg(feature = "telegram-legacy")]
+use crate::transport::adapters::reply_markup_from_transport_keyboard;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -89,7 +91,7 @@ impl BotTransport for TelegramReminderTransport {
         text: &str,
         keyboard: &TransportKeyboard,
     ) -> anyhow::Result<()> {
-        let markup: teloxide::types::ReplyMarkup = keyboard.clone().into();
+        let markup = reply_markup_from_transport_keyboard(keyboard);
         self.bot
             .send_message(ChatId(peer_id), text)
             .reply_markup(markup)

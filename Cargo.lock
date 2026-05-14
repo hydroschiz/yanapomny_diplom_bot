@@ -3391,6 +3391,9 @@ dependencies = [
 name = "transport-core"
 version = "0.2.0-rc.1"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "regex",
  "shared",
 ]
 
@@ -3398,6 +3401,7 @@ dependencies = [
 name = "transport-vk"
 version = "0.2.0-rc.1"
 dependencies = [
+ "serde_json",
  "shared",
  "transport-core",
 ]
@@ -4146,6 +4150,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "transport-core",
  "url",
  "urlencoding",
  "uuid",

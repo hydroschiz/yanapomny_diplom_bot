@@ -27,6 +27,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+regex = "1"
 
 domain = { path = "crates/domain" }
 shared = { path = "crates/shared" }
@@ -43,6 +44,7 @@ edition = "2021"
 
 [dependencies]
 domain = { workspace = true }
+transport-core = { workspace = true }
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 dotenvy = "0.15"
@@ -57,7 +59,7 @@ dashmap = "6"
 mongodb = { version = "2.8", features = ["tokio-runtime", "bson-chrono-0_4"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-regex = "1"
+regex = { workspace = true }
 once_cell = "1"
 
 # HTTP client for LLM API

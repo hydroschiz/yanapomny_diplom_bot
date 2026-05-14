@@ -9,7 +9,10 @@ use crate::bot::{
     router::{AppDialogue, HandlerResult},
     states::AppState,
 };
-use crate::transport::adapters::TelegramTransport;
+use crate::transport::adapters::{
+    inline_keyboard_from_transport_keyboard, reply_markup_from_transport_keyboard,
+    TelegramTransport,
+};
 
 use super::commands::{
     start_utc_flow, AUTO_SNOOZE_PROMPT, SETUP_PROMPT, SNOOZE_PROMPT, UTC_SUCCESS_MESSAGE,
@@ -42,7 +45,7 @@ pub async fn handle_callback(
             bot.answer_callback_query(cq.id).await?;
             bot.send_message(chat_id, SETUP_PROMPT)
                 .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(setup_keyboard())
+                .reply_markup(reply_markup_from_transport_keyboard(&setup_keyboard()))
                 .await?;
             return Ok(());
         }
@@ -63,7 +66,7 @@ pub async fn handle_callback(
             let text = format!("{SNOOZE_PROMPT}\n\nТекущие: <b>{current}</b>");
             bot.send_message(chat_id, text)
                 .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(back_keyboard())
+                .reply_markup(reply_markup_from_transport_keyboard(&back_keyboard()))
                 .await?;
             return Ok(());
         }
@@ -80,7 +83,7 @@ pub async fn handle_callback(
             let text = format!("{AUTO_SNOOZE_PROMPT}\n\nТекущее: <b>{current}</b>");
             bot.send_message(chat_id, text)
                 .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(back_keyboard())
+                .reply_markup(reply_markup_from_transport_keyboard(&back_keyboard()))
                 .await?;
             return Ok(());
         }
@@ -112,7 +115,7 @@ pub async fn handle_callback(
                     page_count
                 ),
             )
-            .reply_markup(utc_keyboard_page(page))
+            .reply_markup(reply_markup_from_transport_keyboard(&utc_keyboard_page(page)))
             .await?;
             return Ok(());
         }
@@ -203,7 +206,7 @@ pub async fn handle_callback(
             bot.answer_callback_query(cq.id).await?;
             bot.send_message(chat_id, SETUP_PROMPT)
                 .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(setup_keyboard())
+                .reply_markup(reply_markup_from_transport_keyboard(&setup_keyboard()))
                 .await?;
             return Ok(());
         }
@@ -348,7 +351,7 @@ async fn handle_snooze_callback(bot: Bot, cq: CallbackQuery, db: Db, data: &str)
     if let Some(ref msg) = cq.message {
         bot.edit_message_text(chat_id, msg.id(), &message)
             .parse_mode(teloxide::types::ParseMode::Html)
-            .reply_markup(keyboard.into())
+            .reply_markup(inline_keyboard_from_transport_keyboard(&keyboard))
             .await?;
     }
 

@@ -28,6 +28,7 @@ use yanapomnyu_bot::api::db::{
 use yanapomnyu_bot::api::llm_models::ParseReminderRequest;
 use yanapomnyu_bot::api::payments::PaymentService;
 use yanapomnyu_bot::bot::states::AppState;
+use yanapomnyu_bot::transport::adapters::TelegramTransport;
 use yanapomnyu_bot::utils::timezone::user_local_time;
 use yanapomnyu_bot::{bot, config::Config, scheduler};
 
@@ -1608,8 +1609,10 @@ async fn run_smoke_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>
         },
     });
 
-    let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
-    scheduler::start_scheduler(bot.clone(), db.clone());
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
+    scheduler::start_scheduler(transport, db.clone());
     results.push(CsvResult {
         test_id: "S-07".to_string(),
         preconditions: "Bot and DB are available.".to_string(),
@@ -2639,11 +2642,10 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
             retry_at: None,
         })
         .await?;
-    scheduler::process_due_reminders_once(
-        &Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
-        &db,
-    )
-    .await?;
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let sent_message = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
     session.send_update(build_callback_update(
         80,
@@ -2695,11 +2697,10 @@ async fn run_functional_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<Funct
         })
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(
-        &Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
-        &db,
-    )
-    .await?;
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let sent_message = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
     let old_time = db
         .find_reminder(snooze_reminder.rem_id.unwrap())
@@ -3085,8 +3086,10 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
         })
         .await?;
     reset_stub_state(ctx).await;
-    let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let updated = db.find_reminder(reminder.rem_id.unwrap()).await?;
     let evidence_dir = ctx.paths.evidence.join("integration").join("I-03");
     fs::create_dir_all(&evidence_dir)?;
@@ -3208,7 +3211,9 @@ async fn run_integration_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvR
 
 async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResult>> {
     let db = Db::connect(&ctx.mongo_uri, Some(&ctx.db_name)).await?;
-    let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
     let mut results = Vec::new();
 
     clear_database(&db).await?;
@@ -3265,7 +3270,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         })
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let sent = db.find_reminder(reminder.rem_id.unwrap()).await?.unwrap();
     results.push(CsvResult {
         test_id: "R-02".to_string(),
@@ -3309,7 +3314,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         })
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let updated = db.find_reminder(reminder.rem_id.unwrap()).await?.unwrap();
     results.push(CsvResult {
         test_id: "R-03".to_string(),
@@ -3353,9 +3358,9 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         })
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let request_count_after_first = ctx.telegram_state.lock().await.snapshot_requests().len();
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let request_count_after_second = ctx.telegram_state.lock().await.snapshot_requests().len();
     results.push(CsvResult {
         test_id: "R-04".to_string(),
@@ -3405,7 +3410,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
     db.delete_reminder(DEFAULT_CHAT_ID, reminder.rem_id.unwrap())
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let no_messages = ctx
         .telegram_state
         .lock()
@@ -3454,7 +3459,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
         })
         .await?;
     reset_stub_state(ctx).await;
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let session = HarnessSession::new(ctx, DEFAULT_CHAT_ID).await?;
     let msg = current_bot_message(ctx, DEFAULT_CHAT_ID).await.unwrap();
     let old = db.find_reminder(reminder.rem_id.unwrap()).await?.unwrap();
@@ -3608,7 +3613,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
             "Internal Server Error",
         );
     }
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let retry_record = db.find_reminder(retryable.rem_id.unwrap()).await?.unwrap();
     results.push(CsvResult {
         test_id: "R-09".to_string(),
@@ -3665,7 +3670,7 @@ async fn run_reminder_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvResu
             "Forbidden: bot was blocked by the user",
         );
     }
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let failed_record = db.find_reminder(permanent.rem_id.unwrap()).await?.unwrap();
     results.push(CsvResult {
         test_id: "R-10".to_string(),
@@ -3928,8 +3933,10 @@ async fn run_resilience_tests(ctx: &AutotestContext) -> anyhow::Result<Vec<CsvRe
             "Internal Server Error",
         );
     }
-    let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let failed = db.find_reminder(reminder.rem_id.unwrap()).await?.unwrap();
     results.push(CsvResult {
         test_id: "X-08".to_string(),
@@ -4204,9 +4211,11 @@ async fn run_performance_tests(
         .await?;
     }
     reset_stub_state(ctx).await;
-    let bot = Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?);
+    let transport = TelegramTransport::new(
+        Bot::new(BOT_TOKEN).set_api_url(reqwest::Url::parse(&ctx.telegram_api_url)?),
+    );
     let started = Instant::now();
-    scheduler::process_due_reminders_once(&bot, &db).await?;
+    scheduler::process_due_reminders_once(&transport, &db).await?;
     let elapsed = started.elapsed().as_millis();
     results.push(PerformanceResult {
         test_id: "P-04".to_string(),

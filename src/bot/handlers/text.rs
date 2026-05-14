@@ -17,6 +17,8 @@ use crate::bot::{
     states::AppState,
 };
 use crate::config::Config;
+#[cfg(feature = "telegram-legacy")]
+use crate::transport::adapters::reply_markup_from_transport_keyboard;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -459,7 +461,7 @@ pub async fn handle_utc_input(
         chat_id,
         "Не удалось определить часовой пояс. Укажите в формате UTC+3 или назовите город. Чтобы выйти, нажмите «Назад».",
     )
-    .reply_markup(utc_keyboard())
+    .reply_markup(reply_markup_from_transport_keyboard(&utc_keyboard()))
     .parse_mode(ParseMode::Html)
     .await?;
 
