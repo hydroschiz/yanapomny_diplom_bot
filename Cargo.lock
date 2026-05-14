@@ -1332,8 +1332,13 @@ dependencies = [
 name = "infrastructure"
 version = "0.2.0-rc.1"
 dependencies = [
+ "application",
+ "async-trait",
+ "chrono",
  "domain",
  "shared",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

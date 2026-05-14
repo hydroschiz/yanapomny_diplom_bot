@@ -1,5 +1,13 @@
 //! Infrastructure layer.
 //!
-//! Заготовка для фазы 3: MongoDB-репозитории, Redis-кэш, YooKassa-шлюз,
-//! HTTP-клиент LLM, Twitch-клиент, системные часы, in-memory FSM store.
-//! На фазе 0 крейт пустой.
+//! Concrete adapters for application ports. The legacy root crate still owns the
+//! production MongoDB/Redis/YooKassa/VK wiring while this crate grows behind the
+//! same contracts.
+
+pub mod clock;
+pub mod id;
+pub mod memory;
+
+pub use clock::SystemClock;
+pub use id::UuidPaymentIdGenerator;
+pub use memory::{InMemoryPendingPayment, InMemoryStore};
