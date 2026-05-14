@@ -48,6 +48,7 @@ dependencies = [
  "domain",
  "shared",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

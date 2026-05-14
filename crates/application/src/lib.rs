@@ -1,6 +1,15 @@
 //! Application layer.
 //!
-//! Заготовка для фазы 2: здесь будут use cases, порты репозиториев и внешних
-//! сервисов, application-сервисы (FSM-координатор) и доменные DTO команд/запросов.
-//! На фазе 0 крейт пустой, чтобы зафиксировать структуру workspace и
-//! граф зависимостей `application → domain, shared`.
+//! Use cases, ports, and command/query DTOs. This crate depends on `domain`, but
+//! does not know about MongoDB, Redis, VK, Telegram, HTTP clients, or axum.
+
+pub mod error;
+pub mod ports;
+pub mod use_cases;
+
+pub use error::{ApplicationError, ApplicationResult};
+pub use ports::{Clock, SubscriptionRepository, UserRepository};
+pub use use_cases::{
+    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ProfileView,
+    SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase, SetUserTimezoneUseCase,
+};
