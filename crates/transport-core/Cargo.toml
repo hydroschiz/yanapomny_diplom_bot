@@ -1,0 +1,10 @@
+[package]
+name = "transport-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transport-neutral bot abstractions."
+publish = false
+
+[dependencies]
+shared = { workspace = true }

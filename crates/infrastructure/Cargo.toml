@@ -1,0 +1,11 @@
+[package]
+name = "infrastructure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Infrastructure adapters: MongoDB, Redis, YooKassa, LLM HTTP, Twitch, system clock."
+publish = false
+
+[dependencies]
+domain = { workspace = true }
+shared = { workspace = true }

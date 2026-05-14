@@ -1,0 +1,12 @@
+[package]
+name = "presentation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transport-neutral presentation layer."
+publish = false
+
+[dependencies]
+application = { workspace = true }
+shared = { workspace = true }
+transport-core = { workspace = true }

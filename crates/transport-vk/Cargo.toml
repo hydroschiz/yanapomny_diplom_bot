@@ -1,0 +1,11 @@
+[package]
+name = "transport-vk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VK transport adapter."
+publish = false
+
+[dependencies]
+shared = { workspace = true }
+transport-core = { workspace = true }
