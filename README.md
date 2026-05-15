@@ -105,6 +105,7 @@ yanapomnyu_bot/
 ├── src/
 │   ├── api/              # Внешние сервисы (MongoDB, LLM, YooKassa)
 │   ├── bot/              # VK бот (handlers, keyboards, states)
+│   ├── bin/              # Standalone entrypoints: scheduler, webhook
 │   ├── scheduler/        # Планировщик отправки напоминаний
 │   ├── config.rs         # Конфигурация из ENV
 │   ├── app.rs            # Инициализация приложения
@@ -138,6 +139,8 @@ yanapomnyu_bot/
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
 | `ADMINS` | ID администраторов (через запятую) | - |
+| `BOT_SCHEDULER_ENABLED` | Запускать scheduler внутри bot process | true |
+| `BOT_WEBHOOK_ENABLED` | Запускать YooKassa webhook внутри bot process | true |
 | `PAYMENTS_ENABLED` | Включить YooKassa-контур; для reminder-only ставьте `false` | auto by creds |
 | `YK_SHOP_ID` | YooKassa Shop ID | test |
 | `YK_SECRET_KEY` | YooKassa Secret Key | test |
@@ -191,7 +194,15 @@ cargo fmt
 
 # Запуск с логами
 RUST_LOG=debug cargo run
+
+# Standalone scheduler без VK long poll
+RUST_LOG=debug cargo run --bin scheduler
+
+# Standalone YooKassa webhook без VK long poll и scheduler
+RUST_LOG=debug cargo run --bin webhook
 ```
+
+Для production можно оставить all-in-one режим или вынести scheduler/webhook в отдельные сервисы: запустите compose с профилем `standalone` и установите `BOT_SCHEDULER_ENABLED=false`, `BOT_WEBHOOK_ENABLED=false` для основного `bot` процесса.
 
 ### Структура БД
 

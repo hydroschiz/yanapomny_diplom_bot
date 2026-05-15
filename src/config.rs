@@ -14,6 +14,8 @@
 //! | `VK_ACCESS_TOKEN` | Access token сообщества VK | обязательно |
 //! | `VK_GROUP_ID` | ID сообщества VK | обязательно |
 //! | `BOT_USERNAME` | Короткое имя бота для упоминаний | yanapomnyu_bot |
+//! | `BOT_SCHEDULER_ENABLED` | Запускать scheduler внутри bot process | true |
+//! | `BOT_WEBHOOK_ENABLED` | Запускать YooKassa webhook внутри bot process | true |
 
 use serde::Deserialize;
 use std::env;
@@ -55,6 +57,14 @@ pub struct Config {
     /// Включён ли платёжный контур.
     /// Если `false`, reminder-only сценарии должны работать без YooKassa.
     pub payments_enabled: bool,
+
+    /// Запускать ли планировщики внутри основного процесса бота.
+    /// Можно выключить, если используется standalone binary `scheduler`.
+    pub bot_scheduler_enabled: bool,
+
+    /// Запускать ли YooKassa webhook внутри основного процесса бота.
+    /// Можно выключить, если используется standalone binary `webhook`.
+    pub bot_webhook_enabled: bool,
 }
 
 fn parse_bool_env(name: &str) -> Option<bool> {
@@ -140,6 +150,8 @@ impl Config {
                 .is_some();
 
         let payments_enabled = parse_bool_env("PAYMENTS_ENABLED").unwrap_or(payment_creds_present);
+        let bot_scheduler_enabled = parse_bool_env("BOT_SCHEDULER_ENABLED").unwrap_or(true);
+        let bot_webhook_enabled = parse_bool_env("BOT_WEBHOOK_ENABLED").unwrap_or(true);
 
         Self {
             admins,
@@ -151,6 +163,8 @@ impl Config {
             vk_group_id,
             bot_username,
             payments_enabled,
+            bot_scheduler_enabled,
+            bot_webhook_enabled,
         }
     }
 }

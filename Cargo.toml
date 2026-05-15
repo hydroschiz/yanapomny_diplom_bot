@@ -41,6 +41,7 @@ presentation = { path = "crates/presentation" }
 name = "yanapomnyu_bot"
 version = "0.2.0-rc.1"
 edition = "2021"
+default-run = "yanapomnyu_bot"
 
 [dependencies]
 domain = { workspace = true }

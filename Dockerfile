@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 # Copy source code
 COPY . .
 
-# Build the application
-RUN cargo build --release
+# Build all runtime entrypoints
+RUN cargo build --release --bins
 
 # Final stage
 FROM debian:bookworm-slim
@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y ca-certificates libssl-dev && rm -rf /v
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/yanapomnyu_bot .
+COPY --from=builder /app/target/release/scheduler .
+COPY --from=builder /app/target/release/webhook .
 
 # Create directory for data if needed
 RUN mkdir -p data
