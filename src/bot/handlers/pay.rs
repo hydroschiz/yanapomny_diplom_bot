@@ -3,18 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::prelude::*;
 
 use crate::api::db::Db;
 use crate::api::payments::{get_tariff, PaymentService};
 use crate::bot::keyboards::{pay_link_keyboard, pay_menu_keyboard, pay_provider_keyboard};
-#[cfg(feature = "telegram-legacy")]
-use crate::bot::router::AppDialogue;
 use crate::bot::router::HandlerResult;
 use crate::bot::states::AppState;
-#[cfg(feature = "telegram-legacy")]
-use crate::transport::adapters::TelegramTransport;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -28,15 +22,6 @@ trait PayStateStore {
 impl PayStateStore for DialogueStore {
     async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult {
         self.update(user_id, state);
-        Ok(())
-    }
-}
-
-#[cfg(feature = "telegram-legacy")]
-#[async_trait]
-impl PayStateStore for AppDialogue {
-    async fn update_state(&self, _user_id: i64, state: AppState) -> HandlerResult {
-        self.update(state).await?;
         Ok(())
     }
 }
@@ -114,47 +99,6 @@ pub async fn command_pay_transport<T: BotTransport>(
     send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
 }
 
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram entrypoint до переключения app/router на VK.
-pub async fn command_pay(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-    payment_svc: Arc<PaymentService>,
-) -> HandlerResult {
-    let peer_id = msg.chat.id.0;
-    let user_id = msg
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .unwrap_or(peer_id);
-    let transport = TelegramTransport::new(bot);
-
-    if !payment_svc.is_enabled() {
-        dialogue.update(AppState::Idle).await?;
-        transport
-            .send_text(
-                peer_id,
-                "⚠️ Платёжный контур сейчас отключён. Базовые сценарии напоминаний работают в reminder-only режиме.",
-            )
-            .await?;
-        return Ok(());
-    }
-
-    let record = db.find_record(user_id).await?;
-    let (is_active, expiry) = match &record {
-        Some(r) => (r.is_active(), Some(r.expiry_formatted())),
-        None => (false, None),
-    };
-
-    let text = format_subscription_status(is_active, expiry.as_deref());
-    let keyboard = pay_menu_keyboard();
-    dialogue.update(AppState::Idle).await?;
-
-    send_html_with_keyboard(&transport, peer_id, &text, &keyboard).await
-}
-
 /// Handle payment-related callbacks through transport abstraction.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_pay_callback_transport<T: BotTransport>(
@@ -174,39 +118,6 @@ pub async fn handle_pay_callback_transport<T: BotTransport>(
         peer_id,
         payload,
         store,
-        db,
-        payment_svc,
-    )
-    .await
-}
-
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram callback entrypoint до переключения app/router на VK.
-pub async fn handle_pay_callback(
-    bot: Bot,
-    cq: CallbackQuery,
-    dialogue: AppDialogue,
-    db: Db,
-    payment_svc: Arc<PaymentService>,
-) -> HandlerResult {
-    let data = match cq.data.as_ref() {
-        Some(d) => d.clone(),
-        None => return Ok(()),
-    };
-    let peer_id = match &cq.message {
-        Some(msg) => msg.chat().id.0,
-        None => return Ok(()),
-    };
-    let user_id = cq.from.id.0 as i64;
-    let transport = TelegramTransport::new(bot);
-
-    handle_pay_callback_core(
-        &transport,
-        &cq.id.0,
-        user_id,
-        peer_id,
-        &data,
-        &dialogue,
         db,
         payment_svc,
     )

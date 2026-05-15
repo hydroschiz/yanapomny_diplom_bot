@@ -2,18 +2,12 @@
 
 use async_trait::async_trait;
 use regex::Regex;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::prelude::*;
 use tracing::info;
 
 use crate::api::db::{ChannelSubscription, Db, Platform};
 use crate::bot::keyboards::channel_subs_keyboard;
-#[cfg(feature = "telegram-legacy")]
-use crate::bot::router::AppDialogue;
 use crate::bot::router::HandlerResult;
 use crate::bot::states::AppState;
-#[cfg(feature = "telegram-legacy")]
-use crate::transport::adapters::TelegramTransport;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -27,15 +21,6 @@ trait ChannelStateStore {
 impl ChannelStateStore for DialogueStore {
     async fn update_state(&self, user_id: i64, state: AppState) -> HandlerResult {
         self.update(user_id, state);
-        Ok(())
-    }
-}
-
-#[cfg(feature = "telegram-legacy")]
-#[async_trait]
-impl ChannelStateStore for AppDialogue {
-    async fn update_state(&self, _user_id: i64, state: AppState) -> HandlerResult {
-        self.update(state).await?;
         Ok(())
     }
 }
@@ -124,20 +109,6 @@ pub async fn command_subs_transport<T: BotTransport>(
     send_html_with_keyboard(transport, peer_id, &text, &keyboard).await
 }
 
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram entrypoint до переключения app/router на VK.
-pub async fn command_subs(bot: Bot, msg: Message, db: Db) -> HandlerResult {
-    let peer_id = msg.chat.id.0;
-    let user_id = msg
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .unwrap_or(peer_id);
-    let transport = TelegramTransport::new(bot);
-
-    command_subs_transport(&transport, peer_id, user_id, db).await
-}
-
 /// Format subscriptions list message.
 fn format_subs_message(subs: &[ChannelSubscription]) -> String {
     let intro = "Отправь ссылку на канал — и я буду уведомлять о новых видео и трансляциях. \
@@ -181,26 +152,6 @@ pub async fn handle_channel_url_transport<T: BotTransport>(
     handle_channel_url_core(transport, peer_id, user_id, text, store, db).await
 }
 
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram entrypoint до переключения app/router на VK.
-pub async fn handle_channel_url(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let text = msg.text().unwrap_or("");
-    let peer_id = msg.chat.id.0;
-    let user_id = msg
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .unwrap_or(peer_id);
-    let transport = TelegramTransport::new(bot);
-
-    handle_channel_url_core(&transport, peer_id, user_id, text, &dialogue, db).await
-}
-
 /// Handle text in AwaitingSubDeleteNum state through transport abstraction.
 pub async fn handle_sub_delete_num_transport<T: BotTransport>(
     transport: &T,
@@ -211,26 +162,6 @@ pub async fn handle_sub_delete_num_transport<T: BotTransport>(
     db: Db,
 ) -> HandlerResult {
     handle_sub_delete_num_core(transport, peer_id, user_id, text, store, db).await
-}
-
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram entrypoint до переключения app/router на VK.
-pub async fn handle_sub_delete_num(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let text = msg.text().unwrap_or("");
-    let peer_id = msg.chat.id.0;
-    let user_id = msg
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .unwrap_or(peer_id);
-    let transport = TelegramTransport::new(bot);
-
-    handle_sub_delete_num_core(&transport, peer_id, user_id, text, &dialogue, db).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -408,24 +339,6 @@ pub async fn handle_sub_delete_callback_transport<T: BotTransport>(
     handle_sub_delete_callback_core(transport, event_id, user_id, peer_id, store, db).await
 }
 
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram callback entrypoint до переключения app/router на VK.
-pub async fn handle_sub_delete_callback(
-    bot: Bot,
-    q: CallbackQuery,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let peer_id = match &q.message {
-        Some(msg) => msg.chat().id.0,
-        None => return Ok(()),
-    };
-    let user_id = q.from.id.0 as i64;
-    let transport = TelegramTransport::new(bot);
-
-    handle_sub_delete_callback_core(&transport, &q.id.0, user_id, peer_id, &dialogue, db).await
-}
-
 /// Handle "subs" callback through transport abstraction.
 pub async fn handle_subs_callback_transport<T: BotTransport>(
     transport: &T,
@@ -438,19 +351,6 @@ pub async fn handle_subs_callback_transport<T: BotTransport>(
         .answer_callback(event_id, user_id, peer_id, None)
         .await?;
     send_subs_list(transport, peer_id, user_id, db).await
-}
-
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram callback entrypoint до переключения app/router на VK.
-pub async fn handle_subs_callback(bot: Bot, q: CallbackQuery, db: Db) -> HandlerResult {
-    let peer_id = match &q.message {
-        Some(msg) => msg.chat().id.0,
-        None => return Ok(()),
-    };
-    let user_id = q.from.id.0 as i64;
-    let transport = TelegramTransport::new(bot);
-
-    handle_subs_callback_transport(&transport, &q.id.0, user_id, peer_id, db).await
 }
 
 #[allow(clippy::too_many_arguments)]

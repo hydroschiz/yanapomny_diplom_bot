@@ -60,7 +60,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # === Telegram Bot (Rust) ===
+  # === VK Bot (Rust) ===
   bot:
     build:
       context: ./yanapomnyu_bot
@@ -75,7 +75,8 @@ services:
       llm_api:
         condition: service_started
     environment:
-      TELOXIDE_TOKEN: ${BOT_TOKEN}
+      VK_ACCESS_TOKEN: ${VK_ACCESS_TOKEN}
+      VK_GROUP_ID: ${VK_GROUP_ID}
       # MongoDB connection - можно задать MONGO_URI напрямую или использовать отдельные переменные
       # Если используете MONGO_USER/MONGO_PASS, пароль будет автоматически URL-encoded
       MONGO_USER: ${MONGO_USER}
@@ -91,11 +92,11 @@ services:
       # Payment settings
       YK_SHOP_ID: ${YK_SHOP_ID:-test}
       YK_SECRET_KEY: ${YK_SECRET_KEY:-test}
-      YK_RETURN_URL: ${YK_RETURN_URL:-https://t.me/yanapomnyu_bot}
+      YK_RETURN_URL: ${YK_RETURN_URL:-https://vk.com/yanapomnyu}
       # Server settings
       IP: "0.0.0.0"
       PORT: "3001"
-      ADMINS: ${ADMINS_ID}
+      ADMINS: ${ADMINS}
       RUST_LOG: ${RUST_LOG:-info}
     networks:
       - bot_network

@@ -1,16 +1,9 @@
 //! Обработчики команды /profile и профиля пользователя.
 
-#[cfg(feature = "telegram-legacy")]
-use teloxide::prelude::*;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::types::Message;
-
 use crate::api::db::Db;
 use crate::bot::keyboards::profile_keyboard;
 use crate::bot::router::HandlerResult;
 use crate::scheduler::format_full_reminder_time_for_user;
-#[cfg(feature = "telegram-legacy")]
-use crate::transport::adapters::TelegramTransport;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
 
@@ -37,25 +30,6 @@ pub async fn handle_profile_command_transport<T: BotTransport>(
     let keyboard = profile_keyboard();
 
     send_html_with_keyboard(transport, peer_id, &message, &keyboard).await
-}
-
-#[cfg(feature = "telegram-legacy")]
-/// Временный Telegram entrypoint до переключения app/router на VK.
-pub async fn handle_profile_command(bot: Bot, msg: Message, db: Db) -> HandlerResult {
-    let peer_id = msg.chat.id.0;
-    let user_id = msg
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .unwrap_or(peer_id);
-    let nickname = msg
-        .from
-        .as_ref()
-        .and_then(|user| user.username.as_deref())
-        .map(|username| format!("@{}", username));
-    let transport = TelegramTransport::new(bot);
-
-    handle_profile_command_transport(&transport, peer_id, user_id, nickname.as_deref(), db).await
 }
 
 async fn build_profile_message(

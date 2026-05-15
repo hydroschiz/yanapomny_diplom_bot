@@ -118,7 +118,7 @@ impl PaymentService {
         let confirmation = json!({
             "type": "redirect",
             "return_url": std::env::var("YK_RETURN_URL")
-                .unwrap_or_else(|_| "https://t.me/yanapomnyu_bot".to_string())
+                .unwrap_or_else(|_| "https://vk.com/yanapomnyu".to_string())
         });
 
         let idempotence_key = IdempotenceKey::new();
@@ -150,7 +150,7 @@ impl PaymentService {
             .and_then(|s| s.parse::<u8>().ok());
         let email_suffix = std::env::var("YK_RECEIPT_EMAIL_SUFFIX")
             .unwrap_or_else(|_| "yanapomnyu.ru".to_string());
-        let customer_email = format!("tg-{}@{}", user_id, email_suffix);
+        let customer_email = format!("vk-{}@{}", user_id, email_suffix);
 
         let mut item = ReceiptItem::new(description.clone(), amount.clone(), "1.0", vat_code);
         item.payment_subject = Some(payment_subject);

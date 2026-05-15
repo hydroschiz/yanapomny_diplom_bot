@@ -1,6 +1,6 @@
 # YaPomnyu Bot - Архитектура проекта
 
-Telegram бот для создания и управления напоминаниями с использованием LLM для парсинга естественного языка.
+VK бот для создания и управления напоминаниями с использованием LLM для парсинга естественного языка.
 
 ## Общая схема
 
@@ -18,13 +18,13 @@ Telegram бот для создания и управления напомина
 │  3. PaymentService         ─── Инициализация YooKassa                       │
 │  4. Axum HTTP server       ─── Webhooks (фоновый task)                      │
 │  5. Scheduler              ─── Планировщик напоминаний (фоновый task)       │
-│  6. Telegram Dispatcher    ─── Основной цикл обработки сообщений           │
+│  6. VK long poll          ─── Основной цикл обработки сообщений            │
 └─────────────────────────────────────────────────────────────────────────────┘
           │                          │                          │
           ▼                          ▼                          ▼
     ┌──────────┐              ┌──────────┐              ┌──────────────┐
     │   bot/   │              │   api/   │              │  scheduler/  │
-    │ Telegram │              │ MongoDB  │              │   Фоновая    │
+    │   VK     │              │ MongoDB  │              │   Фоновая    │
     │ handlers │              │ LLM API  │              │   задача     │
     └──────────┘              └──────────┘              └──────────────┘
 ```
@@ -48,16 +48,15 @@ src/
 │   ├── llm_models.rs    # Модели данных LLM API (парсинг напоминаний)
 │   └── time_calculator.rs # Вычисление времени напоминания из LLM ответа
 │
-├── bot/                 # Telegram бот
+├── bot/                 # VK бот
 │   ├── mod.rs           # Re-exports
-│   ├── router.rs        # Схема роутинга: Commands → Text → Callbacks
+│   ├── router.rs        # VK long poll роутинг: Commands → Text → Callbacks
 │   ├── states/          # Состояния диалогов (FSM)
 │   │   └── mod.rs       # AppState enum
 │   ├── handlers/        # Обработчики сообщений
 │   │   ├── mod.rs       # Re-exports
 │   │   ├── commands.rs  # /start, /setup, /list
 │   │   ├── text.rs      # Текстовые сообщения (настройки timezone)
-│   │   ├── callbacks.rs # Inline кнопки
 │   │   ├── reminder.rs  # Создание/редактирование напоминаний
 │   │   └── pay.rs       # Платежи через YooKassa
 │   ├── keyboards/       # Inline клавиатуры
@@ -92,7 +91,7 @@ src/
 ```rust
 /// Пользователь с настройками
 pub struct User {
-    pub id: i64,              // Telegram chat_id
+    pub id: i64,              // VK peer_id / chat_id
     pub utc: String,          // UTC offset ("UTC+3")
     pub time_zone: String,    // IANA timezone ("Europe/Moscow")
     pub snooze_buttons: Vec<String>,  // Кнопки отложить
@@ -103,7 +102,7 @@ pub struct User {
 
 /// Напоминание
 pub struct Reminder {
-    pub chat_id: i64,         // Telegram chat_id
+    pub chat_id: i64,         // VK peer_id / chat_id
     pub text: String,         // Текст напоминания
     pub delay: String,        // Повторение: "", "day", "week", etc.
     pub time: DateTime<Utc>,  // Время срабатывания (UTC)
@@ -212,20 +211,11 @@ pub struct UserTimePrefs {
 
 ### `bot/router.rs` - Роутинг
 
-Определяет схему обработки Telegram updates:
+Определяет обработку VK long poll events:
 
 ```rust
-pub fn schema() -> UpdateHandler<anyhow::Error> {
-    dptree::entry()
-        .branch(
-            Update::filter_message()
-                .branch(command_handler())  // /start, /setup, /list
-                .branch(text_handler())     // Текстовые сообщения
-        )
-        .branch(
-            Update::filter_callback_query()
-                .endpoint(handle_callback)  // Inline кнопки
-        )
+impl MessageHandler for AppHandler<VkTransport> {
+    async fn handle(&self, event: &Event, api: &VkApi) -> VkResult<()>;
 }
 ```
 
@@ -307,7 +297,7 @@ pub enum AppState {
 │     └── MongoDB findOneAndUpdate: status → "processing"     │
 │                                                             │
 │  2. Параллельная отправка (max 20 concurrent)              │
-│     └── Telegram API: send_message()                        │
+│     └── VK API: send_message()                              │
 │                                                             │
 │  3. Обработка результата:                                   │
 │     ├── OK → mark_sent() / update_time() (recurring)       │
@@ -346,7 +336,7 @@ impl PaymentService {
         -> Result<InitializedPayment>;
     
     /// Axum router для webhook /yookassa/webhook
-    pub fn router(self: Arc<Self>, bot: Bot) -> Router;
+    pub fn router<T: BotTransport>(self: Arc<Self>, transport: T) -> Router;
 }
 ```
 
@@ -364,7 +354,8 @@ impl PaymentService {
 
 | Переменная | Описание | Обязательна |
 |------------|----------|-------------|
-| `TELOXIDE_TOKEN` | Telegram Bot Token | Да |
+| `VK_ACCESS_TOKEN` | Access token сообщества VK | Да |
+| `VK_GROUP_ID` | ID сообщества VK | Да |
 | `MONGO_URI` | MongoDB connection string | Да |
 | `REDIS_URL` | Redis connection string | Нет |
 | `LLM_API_URL` | URL LLM API сервиса | Да |

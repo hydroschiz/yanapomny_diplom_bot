@@ -42,7 +42,7 @@ impl std::fmt::Display for Platform {
 /// Channel subscription for Twitch/YouTube notifications.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSubscription {
-    /// User's Telegram chat ID.
+    /// User's transport peer ID.
     #[serde(rename = "userId")]
     pub user_id: i64,
     /// Platform: twitch or youtube.

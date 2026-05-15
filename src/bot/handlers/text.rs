@@ -3,22 +3,14 @@ use std::collections::HashMap;
 use chrono::{offset::Offset, TimeZone};
 use once_cell::sync::Lazy;
 use regex::Regex;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::prelude::*;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::types::{ChatKind, ParseMode};
 
 use crate::api::db::Db;
-#[cfg(feature = "telegram-legacy")]
-use crate::bot::router::AppDialogue;
 use crate::bot::{
     keyboards::{common::OFFSETS, utc_keyboard},
     router::HandlerResult,
     states::AppState,
 };
 use crate::config::Config;
-#[cfg(feature = "telegram-legacy")]
-use crate::transport::adapters::reply_markup_from_transport_keyboard;
 use crate::transport::dialogue_store::DialogueStore;
 use crate::transport::text_format::strip_html;
 use crate::transport::traits::{BotTransport, TransportKeyboard};
@@ -55,93 +47,6 @@ static CITY_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
         ("самара", "Europe/Samara"),
     ])
 });
-
-#[cfg(feature = "telegram-legacy")]
-pub fn router() -> teloxide::dispatching::UpdateHandler<anyhow::Error> {
-    use teloxide::dispatching::UpdateFilterExt;
-
-    dptree::entry().branch(
-        Update::filter_message()
-            .branch(dptree::case![AppState::AwaitingUtc].endpoint(handle_utc_input))
-            .branch(dptree::case![AppState::AwaitingSnoozeButtons].endpoint(handle_snooze_input))
-            .branch(dptree::case![AppState::AwaitingAutoSnooze].endpoint(handle_auto_snooze_input)),
-    )
-}
-
-#[cfg(feature = "telegram-legacy")]
-pub async fn handle_group_text(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-    config: Config,
-) -> HandlerResult {
-    let text = match msg.text() {
-        Some(t) => t.trim(),
-        None => return Ok(()),
-    };
-
-    let clean_text = match extract_group_mention_text(text, &config.bot_username) {
-        Some(text) => text,
-        None => return Ok(()),
-    };
-
-    let group_id = msg.chat.id.0;
-
-    if let ChatKind::Public(chat) = &msg.chat.kind {
-        let title = chat.title.clone().unwrap_or_else(|| "Group".to_string());
-        let owner_id = msg
-            .from
-            .as_ref()
-            .map(|user| user.id.0 as i64)
-            .unwrap_or(msg.chat.id.0);
-        let _ = db.ensure_group_record(group_id, title, owner_id).await?;
-    }
-
-    let group_user = db.ensure_user(group_id).await?;
-    if !user_has_timezone(&group_user) {
-        bot.send_message(
-            msg.chat.id,
-            format!(
-                "Сначала установите часовой пояс для этого чата командой /start@{} или /utc",
-                config.bot_username
-            ),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Check subscriptions
-    // 1. Check group subscription
-    let mut is_allowed = db.is_subscription_active(group_id).await?;
-
-    // 2. Check sender subscription
-    if !is_allowed {
-        if let Some(user) = &msg.from {
-            if db.is_subscription_active(user.id.0 as i64).await? {
-                is_allowed = true;
-            }
-        }
-    }
-
-    // 3. Check owner subscription
-    if !is_allowed {
-        if let Some(record) = db.find_record(group_id).await? {
-            if let Some(owner_id) = record.owner_id {
-                if db.is_subscription_active(owner_id).await? {
-                    is_allowed = true;
-                }
-            }
-        }
-    }
-
-    if !is_allowed {
-        bot.send_message(msg.chat.id, "⚠️ Подписка не активна. Бот работает в группах, если у группы, отправителя или добавившего администратора есть активная подписка.").await?;
-        return Ok(());
-    }
-
-    super::reminder::start_reminder_creation_flow(bot, msg.chat.id, clean_text, dialogue).await
-}
 
 pub fn extract_group_mention_text(text: &str, bot_username: &str) -> Option<String> {
     let username = bot_username.trim_start_matches('@');
@@ -403,167 +308,6 @@ pub async fn handle_auto_snooze_input_transport<T: BotTransport>(
             human_readable_auto(code)
         ),
     )
-    .await?;
-    Ok(())
-}
-
-#[cfg(feature = "telegram-legacy")]
-pub async fn handle_utc_input(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let text = if let Some(t) = msg.text() {
-        t.trim()
-    } else {
-        ""
-    };
-
-    // Try offsets first.
-    if let Some(offset) = parse_offset(text) {
-        db.ensure_user(chat_id.0).await?;
-        db.update_utc_and_clear_timezone(chat_id.0, &offset).await?;
-        db.update_user_state(chat_id.0, "waiting_for_message")
-            .await?;
-        dialogue.update(AppState::Idle).await?;
-        bot.send_message(
-            chat_id,
-            super::commands::UTC_SUCCESS_MESSAGE.replace("+3:00", &offset),
-        )
-        .parse_mode(ParseMode::Html)
-        .await?;
-        return Ok(());
-    }
-
-    // Try city/IANA timezone resolution.
-    if let Some(tz_name) = resolve_timezone(text) {
-        let tz_offset = timezone_offset_string(&tz_name).unwrap_or("+00:00".to_string());
-
-        db.ensure_user(chat_id.0).await?;
-        db.update_timezone(chat_id.0, &tz_name, &tz_offset).await?;
-        db.update_user_state(chat_id.0, "waiting_for_message")
-            .await?;
-        dialogue.update(AppState::Idle).await?;
-
-        bot.send_message(
-            chat_id,
-            super::commands::UTC_SUCCESS_MESSAGE.replace("+3:00", &tz_offset),
-        )
-        .parse_mode(ParseMode::Html)
-        .await?;
-        return Ok(());
-    }
-
-    // Unknown input -> send prompt again.
-    bot.send_message(
-        chat_id,
-        "Не удалось определить часовой пояс. Укажите в формате UTC+3 или назовите город. Чтобы выйти, нажмите «Назад».",
-    )
-    .reply_markup(reply_markup_from_transport_keyboard(&utc_keyboard()))
-    .parse_mode(ParseMode::Html)
-    .await?;
-
-    Ok(())
-}
-
-#[cfg(feature = "telegram-legacy")]
-pub async fn handle_snooze_input(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let text = msg.text().unwrap_or("").to_string();
-    let durations = parse_duration_list(&text);
-    if durations.is_empty() {
-        bot.send_message(chat_id, "Не понял время. Пример: \"15 мин, 1 час\". Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.")
-            .await?;
-        return Ok(());
-    }
-
-    let mut codes = Vec::new();
-    for m in durations {
-        if let Some(code) = snooze_code(m) {
-            codes.push(code);
-        } else {
-            bot.send_message(
-                chat_id,
-                "Некорректное время. Доступно: 5,10,15,20,30 мин; 1,2,3,4 часа; 1,2,3,7 дней.",
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    db.update_snooze_buttons(chat_id.0, codes.clone()).await?;
-    db.update_user_state(chat_id.0, "waiting_for_message")
-        .await?;
-    dialogue.update(AppState::Idle).await?;
-
-    let human = codes
-        .iter()
-        .filter_map(|c| human_readable_snooze(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    bot.send_message(
-        chat_id,
-        format!("Сохранено. Кнопки откладывания: <b>{}</b>", human),
-    )
-    .parse_mode(ParseMode::Html)
-    .await?;
-    Ok(())
-}
-
-#[cfg(feature = "telegram-legacy")]
-pub async fn handle_auto_snooze_input(
-    bot: Bot,
-    msg: Message,
-    dialogue: AppDialogue,
-    db: Db,
-) -> HandlerResult {
-    let chat_id = msg.chat.id;
-    let text = msg.text().unwrap_or("").to_string();
-    let durations = parse_duration_list(&text);
-    if durations.len() != 1 {
-        bot.send_message(
-            chat_id,
-            "Введите одно значение, например \"15 мин\". Доступно: 5,10,15,20 мин.",
-        )
-        .await?;
-        return Ok(());
-    }
-    let minutes = durations[0];
-    let code = match minutes {
-        5 => Some("5minutAutoSnooze"),
-        10 => Some("10minutAutoSnooze"),
-        15 => Some("15minutAutoSnooze"),
-        20 => Some("20minutAutoSnooze"),
-        _ => None,
-    };
-    let code = if let Some(c) = code {
-        c
-    } else {
-        bot.send_message(chat_id, "Некорректное время. Доступно: 5,10,15,20 мин.")
-            .await?;
-        return Ok(());
-    };
-
-    db.update_auto_delay(chat_id.0, code.to_string()).await?;
-    db.update_user_state(chat_id.0, "waiting_for_message")
-        .await?;
-    dialogue.update(AppState::Idle).await?;
-
-    bot.send_message(
-        chat_id,
-        format!(
-            "Сохранено. Авто откладывание: <b>{}</b>",
-            human_readable_auto(code)
-        ),
-    )
-    .parse_mode(ParseMode::Html)
     .await?;
     Ok(())
 }

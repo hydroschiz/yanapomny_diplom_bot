@@ -1,12 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::dispatching::dialogue::InMemStorage;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::dispatching::UpdateHandler;
-#[cfg(feature = "telegram-legacy")]
-use teloxide::prelude::*;
+use presentation::{parse_command, parse_payload, BotCommand, CallbackPayload};
 use vk_bot_api::api::VkApi;
 use vk_bot_api::error::{VkError, VkResult};
 use vk_bot_api::handler::MessageHandler;
@@ -25,8 +20,6 @@ use crate::transport::traits::{BotTransport, TransportKeyboard};
 
 use super::handlers;
 
-#[cfg(feature = "telegram-legacy")]
-pub type AppDialogue = Dialogue<AppState, InMemStorage<AppState>>;
 pub type HandlerResult = Result<(), anyhow::Error>;
 
 /// VK long-poll handler that routes raw VK events to platform-agnostic handlers.
@@ -184,10 +177,15 @@ impl<T: BotTransport> AppHandler<T> {
         let peer_id = message.peer_id;
         let user_id = message.from_id;
         let is_group = is_group_peer(peer_id);
-        let (command, args) = parse_command(text);
+        let Some(command) = parse_command(text) else {
+            self.transport
+                .send_text(peer_id, "Неизвестная команда. Используйте /help")
+                .await?;
+            return Ok(());
+        };
 
-        match command.as_str() {
-            "start" => {
+        match command.command {
+            BotCommand::Start => {
                 handlers::commands::command_start_transport(
                     &self.transport,
                     peer_id,
@@ -199,13 +197,13 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "help" => {
+            BotCommand::Help => {
                 handlers::commands::command_help_transport(&self.transport, peer_id).await?;
             }
-            "yan" => {
+            BotCommand::Yan => {
                 handlers::commands::command_yan_transport(&self.transport, peer_id).await?;
             }
-            "utc" => {
+            BotCommand::Utc => {
                 handlers::commands::command_utc_transport(
                     &self.transport,
                     peer_id,
@@ -215,7 +213,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "setup" => {
+            BotCommand::Setup => {
                 handlers::commands::command_setup_transport(
                     &self.transport,
                     peer_id,
@@ -225,7 +223,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "pay" => {
+            BotCommand::Pay => {
                 handlers::pay::command_pay_transport(
                     &self.transport,
                     peer_id,
@@ -236,7 +234,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "list" => {
+            BotCommand::List => {
                 handlers::reminder::handle_list_command_transport(
                     &self.transport,
                     peer_id,
@@ -244,7 +242,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "subs" => {
+            BotCommand::Subs => {
                 handlers::channels::command_subs_transport(
                     &self.transport,
                     peer_id,
@@ -253,7 +251,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "profile" => {
+            BotCommand::Profile => {
                 handlers::profile::handle_profile_command_transport(
                     &self.transport,
                     peer_id,
@@ -263,10 +261,10 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            "ref" => {
+            BotCommand::Ref => {
                 handlers::referral::command_ref_transport(&self.transport, peer_id).await?;
             }
-            "remind" => {
+            BotCommand::Remind(args) => {
                 handlers::commands::command_remind_transport(
                     &self.transport,
                     peer_id,
@@ -280,7 +278,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await?;
             }
-            _ => {
+            BotCommand::Unknown(_) => {
                 self.transport
                     .send_text(peer_id, "Неизвестная команда. Используйте /help")
                     .await?;
@@ -294,13 +292,14 @@ impl<T: BotTransport> AppHandler<T> {
         let Some(payload) = callback_payload(event) else {
             return Ok(());
         };
+        let parsed_payload = parse_payload(&payload);
 
         let event_id = event.event_id.as_str();
         let user_id = event.user_id;
         let peer_id = event.peer_id;
 
-        match payload.as_str() {
-            "setup_menu" => {
+        match &parsed_payload {
+            CallbackPayload::SetupMenu => {
                 self.store.update(user_id, AppState::Idle);
                 self.db
                     .update_user_state(peer_id, "waiting_for_message")
@@ -317,7 +316,7 @@ impl<T: BotTransport> AppHandler<T> {
                 .await?;
                 return Ok(());
             }
-            "setup_snooze" => {
+            CallbackPayload::SetupSnooze => {
                 let user = self.db.ensure_user(peer_id).await?;
                 self.store.update(user_id, AppState::AwaitingSnoozeButtons);
                 self.db
@@ -343,7 +342,7 @@ impl<T: BotTransport> AppHandler<T> {
                 send_html_with_keyboard(&self.transport, peer_id, &text, &back_keyboard()).await?;
                 return Ok(());
             }
-            "setup_auto" => {
+            CallbackPayload::SetupAuto => {
                 let user = self.db.ensure_user(peer_id).await?;
                 self.store.update(user_id, AppState::AwaitingAutoSnooze);
                 self.db
@@ -365,7 +364,7 @@ impl<T: BotTransport> AppHandler<T> {
                 send_html_with_keyboard(&self.transport, peer_id, &text, &back_keyboard()).await?;
                 return Ok(());
             }
-            "setup_utc" => {
+            CallbackPayload::SetupUtc => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -382,7 +381,7 @@ impl<T: BotTransport> AppHandler<T> {
             _ => {}
         }
 
-        if payload == "utc_cancel" {
+        if matches!(&parsed_payload, CallbackPayload::UtcCancel) {
             self.store.update(user_id, AppState::Idle);
             self.transport
                 .answer_callback(event_id, user_id, peer_id, None)
@@ -393,24 +392,22 @@ impl<T: BotTransport> AppHandler<T> {
             return Ok(());
         }
 
-        if let Some(rest) = payload.strip_prefix("utc_page:") {
-            if let Ok(page) = rest.parse::<usize>() {
-                self.transport
-                    .answer_callback(event_id, user_id, peer_id, None)
-                    .await?;
-                let page_count = utc_keyboard_page_count();
-                let text = format!(
-                    "Выберите UTC смещение кнопкой или отправьте город/смещение текстом.\n\nСтраница {}/{}",
-                    page % page_count + 1,
-                    page_count
-                );
-                send_html_with_keyboard(&self.transport, peer_id, &text, &utc_keyboard_page(page))
-                    .await?;
-                return Ok(());
-            }
+        if let CallbackPayload::UtcPage(page) = &parsed_payload {
+            self.transport
+                .answer_callback(event_id, user_id, peer_id, None)
+                .await?;
+            let page_count = utc_keyboard_page_count();
+            let text = format!(
+                "Выберите UTC смещение кнопкой или отправьте город/смещение текстом.\n\nСтраница {}/{}",
+                *page % page_count + 1,
+                page_count
+            );
+            send_html_with_keyboard(&self.transport, peer_id, &text, &utc_keyboard_page(*page))
+                .await?;
+            return Ok(());
         }
 
-        if let Some(rest) = payload.strip_prefix("utc_set:") {
+        if let CallbackPayload::UtcSet(rest) = &parsed_payload {
             if let Some(offset) = handlers::text::normalize_offset(rest) {
                 self.db
                     .update_utc_and_clear_timezone(peer_id, &offset)
@@ -432,7 +429,14 @@ impl<T: BotTransport> AppHandler<T> {
             }
         }
 
-        if payload.starts_with("pay_") {
+        if matches!(
+            &parsed_payload,
+            CallbackPayload::PayMenu
+                | CallbackPayload::PayCancel
+                | CallbackPayload::PaySelect(_)
+                | CallbackPayload::PayYooKassa(_)
+                | CallbackPayload::PayCheck(_)
+        ) {
             return handlers::pay::handle_pay_callback_transport(
                 &self.transport,
                 event_id,
@@ -446,8 +450,8 @@ impl<T: BotTransport> AppHandler<T> {
             .await;
         }
 
-        match payload.as_str() {
-            "text_confirm" => {
+        match &parsed_payload {
+            CallbackPayload::TextConfirm => {
                 return handlers::reminder::handle_text_confirm_transport(
                     &self.transport,
                     event_id,
@@ -459,7 +463,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "text_cancel" => {
+            CallbackPayload::TextCancel => {
                 return handlers::reminder::handle_text_cancel_transport(
                     &self.transport,
                     event_id,
@@ -470,7 +474,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "reminder_confirm" => {
+            CallbackPayload::ReminderConfirm => {
                 return handlers::reminder::handle_reminder_confirm_transport(
                     &self.transport,
                     event_id,
@@ -482,7 +486,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "reminder_edit" => {
+            CallbackPayload::ReminderEdit => {
                 return handlers::reminder::handle_reminder_edit_transport(
                     &self.transport,
                     event_id,
@@ -493,7 +497,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "reminder_cancel" => {
+            CallbackPayload::ReminderCancel => {
                 return handlers::reminder::handle_reminder_cancel_transport(
                     &self.transport,
                     event_id,
@@ -504,7 +508,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "reminder_delete_start" => {
+            CallbackPayload::ReminderDeleteStart => {
                 return handlers::reminder::handle_delete_start_transport(
                     &self.transport,
                     event_id,
@@ -515,7 +519,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "reminder_delete_back" => {
+            CallbackPayload::ReminderDeleteBack => {
                 return handlers::reminder::handle_delete_back_transport(
                     &self.transport,
                     event_id,
@@ -527,7 +531,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "sub_delete" => {
+            CallbackPayload::SubDelete => {
                 return handlers::channels::handle_sub_delete_callback_transport(
                     &self.transport,
                     event_id,
@@ -538,7 +542,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "subs" => {
+            CallbackPayload::Subs => {
                 return handlers::channels::handle_subs_callback_transport(
                     &self.transport,
                     event_id,
@@ -548,7 +552,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "profile" | "profile_stub" => {
+            CallbackPayload::Profile => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -561,7 +565,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "profile_list" => {
+            CallbackPayload::ProfileList => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -572,7 +576,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "profile_setup" => {
+            CallbackPayload::ProfileSetup => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -585,7 +589,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "profile_subs" => {
+            CallbackPayload::ProfileSubs => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -597,13 +601,13 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "profile_referral" => {
+            CallbackPayload::ProfileReferral => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
                 return handlers::referral::command_ref_transport(&self.transport, peer_id).await;
             }
-            "profile_pay" => {
+            CallbackPayload::ProfilePay => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -617,7 +621,7 @@ impl<T: BotTransport> AppHandler<T> {
                 )
                 .await;
             }
-            "back_main" => {
+            CallbackPayload::BackMain => {
                 self.store.update(user_id, AppState::Idle);
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
@@ -627,7 +631,7 @@ impl<T: BotTransport> AppHandler<T> {
                     .await?;
                 return Ok(());
             }
-            "reminder_list" => {
+            CallbackPayload::ReminderList => {
                 self.transport
                     .answer_callback(event_id, user_id, peer_id, None)
                     .await?;
@@ -641,7 +645,7 @@ impl<T: BotTransport> AppHandler<T> {
             _ => {}
         }
 
-        if payload.starts_with("snooze:") {
+        if matches!(&parsed_payload, CallbackPayload::Snooze { .. }) {
             return handlers::reminder::handle_snooze_callback_transport(
                 &self.transport,
                 event_id,
@@ -653,7 +657,7 @@ impl<T: BotTransport> AppHandler<T> {
             .await;
         }
 
-        if payload.starts_with("reminder_done:") {
+        if matches!(&parsed_payload, CallbackPayload::ReminderDone(_)) {
             return handlers::reminder::handle_reminder_done_callback_transport(
                 &self.transport,
                 event_id,
@@ -690,67 +694,8 @@ impl<T: BotTransport> MessageHandler for AppHandler<T> {
     }
 }
 
-#[cfg(feature = "telegram-legacy")]
-pub async fn build_deps() -> anyhow::Result<DependencyMap> {
-    let config = crate::config::Config::from_env();
-    let storage = InMemStorage::<AppState>::new();
-    let db = Db::connect(&config.mongo_uri, None).await?;
-
-    let payment_svc: Arc<PaymentService> = if config.payments_enabled {
-        Arc::new(PaymentService::from_env(db.clone())?)
-    } else {
-        Arc::new(PaymentService::disabled(db.clone()))
-    };
-
-    Ok(dptree::deps![config, storage, db, payment_svc])
-}
-
-/// Legacy Telegram schema kept behind `telegram-legacy` for local compatibility.
-#[cfg(feature = "telegram-legacy")]
-pub fn schema() -> UpdateHandler<anyhow::Error> {
-    use teloxide::dispatching::UpdateFilterExt;
-
-    let messages = Update::filter_message()
-        .enter_dialogue::<Message, InMemStorage<AppState>, AppState>()
-        .branch(handlers::commands::router())
-        .branch(handlers::text::router())
-        .branch(
-            dptree::case![AppState::AwaitingReminderEdit { pending }]
-                .endpoint(handlers::reminder::handle_reminder_edit_text),
-        )
-        .branch(
-            dptree::case![AppState::AwaitingReminderDeletion]
-                .endpoint(handlers::reminder::handle_deletion_input),
-        )
-        .branch(
-            dptree::case![AppState::AwaitingSubDeleteNum]
-                .endpoint(handlers::channels::handle_sub_delete_num),
-        )
-        .branch(dptree::case![AppState::Idle].endpoint(handlers::reminder::handle_idle_text));
-
-    let callbacks = Update::filter_callback_query()
-        .enter_dialogue::<CallbackQuery, InMemStorage<AppState>, AppState>()
-        .branch(dptree::endpoint(handlers::callbacks::handle_callback));
-
-    dptree::entry().branch(messages).branch(callbacks)
-}
-
 fn is_group_peer(peer_id: i64) -> bool {
     peer_id >= 2_000_000_000
-}
-
-fn parse_command(text: &str) -> (String, String) {
-    let mut parts = text.trim().splitn(2, char::is_whitespace);
-    let raw = parts.next().unwrap_or_default();
-    let args = parts.next().unwrap_or_default().trim().to_string();
-    let command = raw
-        .trim_start_matches('/')
-        .split('@')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    (command, args)
 }
 
 fn callback_payload(event: &MessageEvent) -> Option<String> {

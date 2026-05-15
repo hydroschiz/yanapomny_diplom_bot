@@ -1,6 +1,6 @@
 # YaPomnyu Bot 🤖⏰
 
-Telegram бот для создания и управления напоминаниями с использованием естественного языка и LLM для парсинга.
+VK бот для создания и управления напоминаниями с использованием естественного языка и LLM для парсинга.
 
 <div align="center">
 
@@ -28,8 +28,8 @@ Telegram бот для создания и управления напомина
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Telegram Bot (Rust)                   │
-│  • teloxide - Telegram API                              │
+│                       VK Bot (Rust)                      │
+│  • vk-bot-api - VK long poll                            │
 │  • MongoDB - хранение данных                            │
 │  • Redis - кэширование платежей                         │
 │  • YooKassa - платежная система                         │
@@ -104,7 +104,7 @@ cargo run
 yanapomnyu_bot/
 ├── src/
 │   ├── api/              # Внешние сервисы (MongoDB, LLM, YooKassa)
-│   ├── bot/              # Telegram бот (handlers, keyboards, states)
+│   ├── bot/              # VK бот (handlers, keyboards, states)
 │   ├── scheduler/        # Планировщик отправки напоминаний
 │   ├── config.rs         # Конфигурация из ENV
 │   ├── app.rs            # Инициализация приложения
@@ -127,7 +127,8 @@ yanapomnyu_bot/
 
 | Переменная | Описание |
 |------------|----------|
-| `TELOXIDE_TOKEN` | Токен Telegram бота от @BotFather |
+| `VK_ACCESS_TOKEN` | Access token сообщества VK |
+| `VK_GROUP_ID` | ID сообщества VK |
 | `MONGO_URI` | MongoDB connection string |
 | `REDIS_URL` | Redis URL для кэширования |
 | `LLM_API_URL` | URL LLM API сервиса |
@@ -197,7 +198,7 @@ RUST_LOG=debug cargo run
 ```javascript
 // users
 {
-  id: 123456789,           // Telegram chat_id
+  id: 123456789,           // VK peer_id / chat_id
   utc: "UTC+3",           // Часовой пояс
   timezone: "Europe/Moscow",
   delay: ["1hourSnooze", "3hourSnooze"],  // Кнопки отложить
@@ -281,7 +282,7 @@ MIT License - см. [LICENSE](LICENSE)
 
 **Полезные ссылки:**
 
-- [Teloxide Documentation](https://docs.rs/teloxide/)
+- [vk-bot-api crate](https://crates.io/crates/vk-bot-api)
 - [MongoDB Rust Driver](https://docs.rs/mongodb/)
 - [YooKassa API](https://yookassa.ru/developers/api)
 - [OpenRouter AI](https://openrouter.ai/)

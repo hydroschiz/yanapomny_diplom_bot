@@ -16,7 +16,7 @@
 //! │                                                             │
 //! │  2. buffer_unordered(20) + Semaphore(20)                   │
 //! │     ├─ Параллельная отправка с ограничением                 │
-//! │     └─ Rate limiting для Telegram API                       │
+//! │     └─ Rate limiting для API транспорта                     │
 //! │                                                             │
 //! │  3. Обработка результата:                                   │
 //! │     ├─ OK → mark_sent / update_time (recurring)            │
@@ -58,7 +58,7 @@
 //! ## Особенности
 //!
 //! - **Атомарный захват** предотвращает дублирование при overlapping циклов
-//! - **Semaphore** ограничивает параллельные запросы к Telegram API
+//! - **Semaphore** ограничивает параллельные запросы к API транспорта
 //! - **Recovery** восстанавливает "зависшие" напоминания при старте
 
 pub mod channels;
@@ -94,7 +94,7 @@ const SCHEDULER_INTERVAL_SECS: u64 = 10;
 const BATCH_SIZE: i64 = 100;
 
 /// Максимальное количество параллельных отправок.
-/// Учитывает rate limits Telegram API (~30 msg/sec).
+/// Учитывает rate limits внешнего API транспорта.
 const MAX_CONCURRENT_SENDS: usize = 20;
 
 /// Максимальное количество попыток отправки.
