@@ -41,7 +41,6 @@ const CHANNEL_CHECK_INTERVAL_SECS: u64 = 300;
 
 /// Twitch API endpoints.
 const TWITCH_STREAMS_URL: &str = "https://api.twitch.tv/helix/streams";
-const TWITCH_USERS_URL: &str = "https://api.twitch.tv/helix/users";
 
 // ============================================================================
 // Twitch API Types
@@ -55,24 +54,11 @@ struct TwitchStreamsResponse {
 #[derive(Debug, Deserialize)]
 struct TwitchStream {
     id: String,
-    user_id: String,
     user_login: String,
     user_name: String,
     game_name: String,
     title: String,
     viewer_count: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TwitchUsersResponse {
-    data: Vec<TwitchUser>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TwitchUser {
-    id: String,
-    login: String,
-    display_name: String,
 }
 
 // ============================================================================

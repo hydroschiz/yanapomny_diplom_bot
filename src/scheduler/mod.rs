@@ -326,39 +326,6 @@ async fn send_reminder(
     Ok(())
 }
 
-/// Форматирует время напоминания для отображения.
-/// Формат: "21.10 (вторник, 13:31)"
-fn format_reminder_time(time: &DateTime<Utc>, utc_offset: &str) -> String {
-    use chrono::FixedOffset;
-
-    // Парсим смещение пользователя
-    let offset_secs = parse_utc_offset(utc_offset).unwrap_or(0);
-    let offset = FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap());
-
-    // Конвертируем в локальное время пользователя
-    let local_time = time.with_timezone(&offset);
-
-    // Названия дней недели на русском
-    let weekday = match local_time.weekday() {
-        chrono::Weekday::Mon => "понедельник",
-        chrono::Weekday::Tue => "вторник",
-        chrono::Weekday::Wed => "среда",
-        chrono::Weekday::Thu => "четверг",
-        chrono::Weekday::Fri => "пятница",
-        chrono::Weekday::Sat => "суббота",
-        chrono::Weekday::Sun => "воскресенье",
-    };
-
-    format!(
-        "{:02}.{:02} ({}, {:02}:{:02})",
-        local_time.day(),
-        local_time.month(),
-        weekday,
-        local_time.hour(),
-        local_time.minute()
-    )
-}
-
 pub fn format_reminder_time_for_user(time: &DateTime<Utc>, user: &User) -> String {
     let local_time = user_local_time(user, *time);
 

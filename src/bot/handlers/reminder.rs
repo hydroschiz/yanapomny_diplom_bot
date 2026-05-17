@@ -626,7 +626,7 @@ where
         time: reminder_time,
         status: "active".to_string(),
         rem_id: None,
-        messageID: None,
+        message_id: None,
         snooze_time: None,
         retry_count: 0,
         retry_at: None,

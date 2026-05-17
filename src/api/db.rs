@@ -546,15 +546,15 @@ impl Db {
             "$or": [
                 {
                     "status": "active",
-                    "time": { "$lte": now_bson.clone() }
+                    "time": { "$lte": now_bson }
                 },
                 {
                     "status": "retry",
-                    "retryAt": { "$lte": now_bson.clone() }
+                    "retryAt": { "$lte": now_bson }
                 },
                 {
                     "status": "1",
-                    "time": { "$lte": now_bson.clone() }
+                    "time": { "$lte": now_bson }
                 }
             ]
         };
@@ -1201,8 +1201,8 @@ pub struct Reminder {
     pub status: String,
     #[serde(rename = "remID", default)]
     pub rem_id: Option<i32>,
-    #[serde(default)]
-    pub messageID: Option<i32>,
+    #[serde(rename = "messageID", default)]
+    pub message_id: Option<i32>,
     #[serde(
         rename = "snoozeTime",
         default,

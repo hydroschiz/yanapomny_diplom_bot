@@ -66,17 +66,12 @@ pub struct ParsedReminder {
 }
 
 /// Reminder type enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReminderType {
+    #[default]
     OneTime,
     Recurring,
-}
-
-impl Default for ReminderType {
-    fn default() -> Self {
-        Self::OneTime
-    }
 }
 
 // ============================================================================

@@ -126,16 +126,16 @@ fn parse_utc_offset_to_seconds(s: &str) -> Option<i32> {
     }
 
     // Determine sign
-    let (sign, rest) = if s.starts_with('+') {
-        (1, &s[1..])
-    } else if s.starts_with('-') {
-        (-1, &s[1..])
+    let (sign, rest) = if let Some(rest) = s.strip_prefix('+') {
+        (1, rest)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        (-1, rest)
     } else {
         (1, s)
     };
 
     // Parse hours and minutes
-    let parts: Vec<&str> = rest.split(|c| c == ':' || c == '.').collect();
+    let parts: Vec<&str> = rest.split([':', '.']).collect();
     let hours: i32 = parts.first()?.trim().parse().ok()?;
     let minutes: i32 = parts
         .get(1)
@@ -258,16 +258,16 @@ fn calculate_relative(
     };
 
     if spec.offset_minutes != 0 {
-        result = result + Duration::minutes(spec.offset_minutes as i64 * multiplier);
+        result += Duration::minutes(spec.offset_minutes as i64 * multiplier);
     }
     if spec.offset_hours != 0 {
-        result = result + Duration::hours(spec.offset_hours as i64 * multiplier);
+        result += Duration::hours(spec.offset_hours as i64 * multiplier);
     }
     if spec.offset_days != 0 {
-        result = result + Duration::days(spec.offset_days as i64 * multiplier);
+        result += Duration::days(spec.offset_days as i64 * multiplier);
     }
     if spec.offset_weeks != 0 {
-        result = result + Duration::weeks(spec.offset_weeks as i64 * multiplier);
+        result += Duration::weeks(spec.offset_weeks as i64 * multiplier);
     }
     if spec.offset_months != 0 {
         result = add_months(result, spec.offset_months * multiplier as i32, prefs);
@@ -306,7 +306,7 @@ fn calculate_weekday(
 
     // If this time already passed today, move to next week
     if result <= now {
-        result = result + Duration::weeks(1);
+        result += Duration::weeks(1);
     }
 
     Ok(result)
@@ -342,10 +342,10 @@ fn calculate_absolute(
     };
 
     if spec.offset_weeks != 0 {
-        result = result + Duration::weeks(spec.offset_weeks as i64 * multiplier);
+        result += Duration::weeks(spec.offset_weeks as i64 * multiplier);
     }
     if spec.offset_days != 0 {
-        result = result + Duration::days(spec.offset_days as i64 * multiplier);
+        result += Duration::days(spec.offset_days as i64 * multiplier);
     }
 
     // Apply time
@@ -426,7 +426,7 @@ fn calculate_daily(
 
     // If time already passed today, move to tomorrow
     if result <= now {
-        result = result + Duration::days(1);
+        result += Duration::days(1);
     }
 
     Ok(result)
@@ -684,7 +684,7 @@ fn find_nth_weekday_of_month(
         }
 
         // Add (n-1) weeks
-        day = day + Duration::weeks((n - 1) as i64);
+        day += Duration::weeks((n - 1) as i64);
 
         // Check if still in same month
         if day.month() != month {
@@ -726,11 +726,11 @@ pub fn calculate_next_occurrence(
             // Apply filters
             if recurrence.filters.contains(&RecurrenceFilter::Weekdays) {
                 while !is_weekday(next.weekday()) {
-                    next = next + Duration::days(1);
+                    next += Duration::days(1);
                 }
             } else if recurrence.filters.contains(&RecurrenceFilter::Weekends) {
                 while !is_weekend(next.weekday()) {
-                    next = next + Duration::days(1);
+                    next += Duration::days(1);
                 }
             }
 

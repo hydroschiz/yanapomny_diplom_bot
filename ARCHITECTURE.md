@@ -1,397 +1,194 @@
-# YaPomnyu Bot - Архитектура проекта
+# YaPomnyu Bot - Архитектура
 
-VK бот для создания и управления напоминаниями с использованием LLM для парсинга естественного языка.
+VK бот для создания и доставки напоминаний. После фаз 0-8 Telegram legacy удалён, основной runtime работает через VK long poll, а scheduler и YooKassa webhook можно запускать отдельно.
 
-## Общая схема
+## Runtime
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                 main.rs / bin/scheduler.rs / bin/webhook.rs                 │
-│                    Точки входа, инициализация логирования                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                               app.rs                                         │
-│  1. Config::from_env()     ─── Загрузка конфигурации                        │
-│  2. Db::connect()          ─── Подключение к MongoDB                        │
-│  3. PaymentService         ─── Инициализация YooKassa                       │
-│  4. Axum HTTP server       ─── Webhooks (embedded или standalone)           │
-│  5. Scheduler              ─── Планировщик (embedded или standalone)        │
-│  6. VK long poll           ─── Основной цикл обработки сообщений            │
-└─────────────────────────────────────────────────────────────────────────────┘
-          │                          │                          │
-          ▼                          ▼                          ▼
-    ┌──────────┐              ┌──────────┐              ┌──────────────┐
-    │   bot/   │              │   api/   │              │  scheduler/  │
-    │   VK     │              │ MongoDB  │              │   Фоновая    │
-    │ handlers │              │ LLM API  │              │   задача     │
-    └──────────┘              └──────────┘              └──────────────┘
+```text
+                         ┌──────────────────────────────┐
+                         │          MongoDB             │
+                         │ users/reminds/records/tx     │
+                         └──────────────┬───────────────┘
+                                        │
+┌──────────────────────┐    ┌───────────▼───────────┐    ┌──────────────────────┐
+│ VK long poll          │    │ yanapomnyu_bot runtime │    │ YooKassa webhook     │
+│ vk-bot-api            │◄──►│ app/config/api/bot     │◄──►│ axum /payments       │
+└──────────────────────┘    └───────────┬───────────┘    └──────────────────────┘
+                                        │
+                         ┌──────────────▼───────────────┐
+                         │ schedulers                    │
+                         │ reminders/subscriptions/chans │
+                         └──────────────────────────────┘
 ```
 
----
+The default `yanapomnyu_bot` binary is all-in-one: VK long poll, embedded schedulers, and embedded webhook server. For split deployments, run `scheduler` and `webhook` binaries separately and disable embedded components in the bot process.
 
-## Структура каталогов
+## Entry Points
 
-```
-src/
-├── bin/
-│   ├── scheduler.rs       # Standalone scheduler service
-│   └── webhook.rs         # Standalone YooKassa webhook service
-├── main.rs              # Точка входа
-├── app.rs               # Инициализация и запуск компонентов
-├── config.rs            # Конфигурация из ENV
-│
-├── api/                 # Работа с внешними сервисами
-│   ├── mod.rs           # Re-exports
-│   ├── db.rs            # MongoDB: пользователи, напоминания, платежи
-│   ├── cache.rs         # Redis: кэширование pending платежей
-│   ├── payments.rs      # YooKassa: создание/обработка платежей
-│   ├── llm_client.rs    # HTTP клиент для LLM API
-│   ├── llm_models.rs    # Модели данных LLM API (парсинг напоминаний)
-│   └── time_calculator.rs # Вычисление времени напоминания из LLM ответа
-│
-├── bot/                 # VK бот
-│   ├── mod.rs           # Re-exports
-│   ├── router.rs        # VK long poll роутинг: Commands → Text → Callbacks
-│   ├── states/          # Состояния диалогов (FSM)
-│   │   └── mod.rs       # AppState enum
-│   ├── handlers/        # Обработчики сообщений
-│   │   ├── mod.rs       # Re-exports
-│   │   ├── commands.rs  # /start, /setup, /list
-│   │   ├── text.rs      # Текстовые сообщения (настройки timezone)
-│   │   ├── reminder.rs  # Создание/редактирование напоминаний
-│   │   └── pay.rs       # Платежи через YooKassa
-│   ├── keyboards/       # Inline клавиатуры
-│   │   ├── mod.rs       # Re-exports всех клавиатур
-│   │   ├── common.rs    # Общие: setup, back, utc
-│   │   ├── pay.rs       # Платежи: menu, provider, link
-│   │   └── reminder.rs  # Напоминания: confirm, edit, delete
-│   └── filters/         # Фильтры для handlers
-│       └── mod.rs
-│
-├── scheduler/           # Планировщик напоминаний
-│   └── mod.rs           # Фоновая задача отправки напоминаний
-│
-└── utils/               # Вспомогательные утилиты
-    └── mod.rs
+| Binary | Purpose |
+|--------|---------|
+| `yanapomnyu_bot` | Main VK bot process. Starts VK long poll and, by default, embedded schedulers/webhook. |
+| `scheduler` | Standalone scheduler process. Runs reminder delivery, subscription expiry checks, and channel checks without VK long poll. |
+| `webhook` | Standalone YooKassa webhook process. Runs Axum server without VK long poll or schedulers. |
+
+Runtime switches:
+
+| Env | Default | Effect |
+|-----|---------|--------|
+| `BOT_SCHEDULER_ENABLED` | `true` | Starts schedulers inside `yanapomnyu_bot`. Set `false` when `scheduler` runs separately. |
+| `BOT_WEBHOOK_ENABLED` | `true` | Starts YooKassa webhook inside `yanapomnyu_bot`. Set `false` when `webhook` runs separately. |
+| `PAYMENTS_ENABLED` | auto by YooKassa credentials | Enables payment creation and webhook processing. |
+
+## Workspace Layers
+
+```text
+crates/domain          Pure value objects and domain rules
+crates/application     Use cases and ports
+crates/infrastructure  In-memory/test adapters and shared infrastructure primitives
+crates/transport-core  Transport-neutral message, keyboard, capability traits
+crates/transport-vk    VK keyboard conversion and VK capability rules
+crates/presentation    Command/payload parsing, router intents, rendering, keyboard builders
+src/                   Production VK runtime and legacy-compatible persistence adapters
 ```
 
----
+Layering rules:
 
-## Модули
+| Layer | May Depend On | Must Not Depend On |
+|-------|---------------|--------------------|
+| `domain` | std/chrono-like pure types | VK, MongoDB, Redis, YooKassa, HTTP clients |
+| `application` | `domain`, ports | VK, MongoDB, Redis, YooKassa, concrete HTTP clients |
+| `presentation` | `application` concepts, `transport-core` DTOs | VK API, MongoDB, Redis, YooKassa |
+| `transport-core` | none of the runtime adapters | VK, Telegram, MongoDB |
+| `transport-vk` | `transport-core` | business use cases, MongoDB |
+| `src/` runtime | all crates and concrete adapters | Telegram/teloxide legacy |
 
-### `api/db.rs` - MongoDB
+The root `src/` runtime still contains production adapters for the current deployment: MongoDB compatibility in `api/db.rs`, YooKassa in `api/payments.rs`, LLM HTTP in `api/llm_client.rs`, VK long poll routing in `bot/router.rs`, and scheduler loops in `scheduler/`.
 
-**Коллекции:**
-- `users` - Пользователи с настройками (timezone, snooze, etc.)
-- `reminders` - Напоминания
-- `records` - Записи о пользователях (legacy)
-- `transactions` - Платежи
+## Message Flow
 
-**Ключевые структуры:**
+1. `vk-bot-api` receives a long poll event.
+2. `src/bot/router.rs` normalizes it into command, text, or callback handling.
+3. `presentation` parsers classify commands and callback payloads.
+4. Handlers use MongoDB/LLM/YooKassa adapters from `src/api/` and update `DialogueStore`.
+5. Replies are sent through `BotTransport` implemented by `src/transport/vk.rs`.
+6. Keyboard constraints are centralized through transport capabilities and VK sanitization rules.
 
-```rust
-/// Пользователь с настройками
-pub struct User {
-    pub id: i64,              // VK peer_id / chat_id
-    pub utc: String,          // UTC offset ("UTC+3")
-    pub time_zone: String,    // IANA timezone ("Europe/Moscow")
-    pub snooze_buttons: Vec<String>,  // Кнопки отложить
-    pub morning: String,      // Время "утро" ("8:00")
-    pub afternoon: String,    // Время "день" ("14:00")
-    pub evening: String,      // Время "вечер" ("19:00")
-}
+## Scheduler Flow
 
-/// Напоминание
-pub struct Reminder {
-    pub chat_id: i64,         // VK peer_id / chat_id
-    pub text: String,         // Текст напоминания
-    pub delay: String,        // Повторение: "", "day", "week", etc.
-    pub time: DateTime<Utc>,  // Время срабатывания (UTC)
-    pub status: String,       // "active", "processing", "retry", "sent", "failed"
-    pub rem_id: Option<i32>,  // Уникальный ID напоминания
-    pub retry_count: i32,     // Счётчик retry
-    pub retry_at: Option<DateTime<Utc>>,  // Время следующего retry
-}
+Reminder delivery uses the same `BotTransport` abstraction as the interactive bot.
+
+```text
+claim_due_reminders(batch)
+        │
+        ▼
+status active/retry -> processing, atomically in MongoDB
+        │
+        ▼
+parallel send through BotTransport, max concurrency 20
+        │
+        ├── success: mark sent or schedule next recurrence
+        ├── temporary error: exponential retry
+        └── permanent error: mark failed
 ```
 
-**Ключевые методы:**
+Standalone `scheduler` reuses the same `scheduler::start_scheduler`, `start_subscription_scheduler`, and `start_channel_scheduler` functions as the all-in-one process.
 
-| Метод | Описание |
-|-------|----------|
-| `connect()` | Подключение к MongoDB |
-| `find_user()` | Найти пользователя по chat_id |
-| `upsert_user()` | Создать/обновить пользователя |
-| `insert_reminder()` | Создать напоминание |
-| `claim_due_reminders()` | Атомарно захватить batch due напоминаний |
-| `mark_reminder_sent()` | Пометить как отправленное |
-| `schedule_retry()` | Запланировать retry с exponential backoff |
+## Payment Flow
 
----
+1. User opens `/pay` and selects a tariff.
+2. `PaymentService::init_or_get_last` creates or reuses a pending YooKassa payment.
+3. Pending payment metadata is cached in Redis.
+4. YooKassa calls `POST /yookassa/webhook`.
+5. `PaymentService::handle_webhook` deduplicates through Redis, extends subscription in MongoDB, stores transaction status, and notifies the user through `BotTransport`.
 
-### `api/llm_client.rs` - LLM API клиент
+The webhook route is available in both modes:
 
-HTTP клиент для обращения к Go сервису `llm_api`, который парсит
-естественный язык в структурированные напоминания.
+| Mode | Route Owner |
+|------|-------------|
+| all-in-one | `yanapomnyu_bot` when `BOT_WEBHOOK_ENABLED=true` |
+| standalone | `webhook` binary |
 
-```rust
-pub struct LlmClient {
-    client: reqwest::Client,
-    base_url: String,
-}
+## Configuration
 
-impl LlmClient {
-    /// Парсит текст напоминания через LLM
-    pub async fn parse_reminder(
-        &self,
-        text: &str,
-        user_timezone: &str,    // "+07:00"
-        user_datetime: &str,    // "2025-12-05 00:42"
-    ) -> Result<ReminderResponse>;
-}
-```
+Required for the main bot:
 
----
+| Env | Description |
+|-----|-------------|
+| `VK_ACCESS_TOKEN` | VK community access token |
+| `VK_GROUP_ID` | VK community group ID |
+| `MONGO_URI` or `MONGO_USER`/`MONGO_PASS`/`MONGO_HOST`/`MONGO_PORT`/`MONGO_DB` | MongoDB connection |
+| `REDIS_URL` | Redis URL for payment cache |
+| `LLM_API_URL` | LLM API URL |
 
-### `api/llm_models.rs` - Модели LLM API
+Required for payments:
 
-Модели для парсинга JSON ответов от LLM API.
+| Env | Description |
+|-----|-------------|
+| `PAYMENTS_ENABLED=true` | Enables payment flow and webhook processing |
+| `YK_SHOP_ID` | YooKassa shop ID |
+| `YK_SECRET_KEY` | YooKassa secret key |
+| `YK_RETURN_URL` | Payment return URL, defaults to VK page |
 
-```rust
-/// Ответ от LLM API
-pub struct ReminderResponse {
-    pub status: String,        // "success" | "error"
-    pub reminder: Option<ParsedReminder>,
-    pub error: Option<ErrorDetail>,
-}
+Optional:
 
-/// Распарсенное напоминание
-pub struct ParsedReminder {
-    pub description: String,   // Текст напоминания
-    pub reminder_type: ReminderType,  // OneTime | Recurring
-    pub time_spec: Option<TimeSpec>,  // Спецификация времени
-    pub recurrence: Option<RecurrenceInfo>,  // Для повторяющихся
-}
+| Env | Description |
+|-----|-------------|
+| `BOT_USERNAME` | Bot short name for group mentions |
+| `ADMINS` | Comma-separated admin VK IDs |
+| `TWITCH_CLIENT_ID`, `TWITCH_ACCESS_TOKEN` | Enables Twitch channel scheduler |
+| `IP`, `PORT` | Webhook server bind address |
+| `RUST_LOG` | Tracing filter |
 
-/// Спецификация времени
-pub struct TimeSpec {
-    pub spec_type: TimeSpecType,  // Relative, Weekday, Absolute, etc.
-    pub anchor: Option<Anchor>,   // now, today, specific date
-    pub offset_minutes: Option<i32>,
-    pub offset_hours: Option<i32>,
-    pub offset_days: Option<i32>,
-    pub weekday: Option<Weekday>,
-    pub time: Option<String>,     // "HH:MM"
-    pub time_of_day: Option<TimeOfDay>,  // Morning, Afternoon, Evening
-}
-```
+## Deployment Modes
 
----
-
-### `api/time_calculator.rs` - Вычисление времени
-
-Преобразует `TimeSpec` из LLM в конкретный `DateTime<Utc>`.
-
-```rust
-/// Вычисляет время напоминания из спецификации LLM
-pub fn calculate_reminder_time(
-    parsed: &ParsedReminder,
-    now: DateTime<Utc>,
-    prefs: &UserTimePrefs,
-) -> Result<DateTime<Utc>>;
-
-/// Настройки времени пользователя
-pub struct UserTimePrefs {
-    pub morning: NaiveTime,    // "Утро" = 08:00
-    pub afternoon: NaiveTime,  // "День" = 14:00
-    pub evening: NaiveTime,    // "Вечер" = 19:00
-    pub timezone_offset_hours: i32,  // Смещение от UTC
-}
-```
-
----
-
-### `bot/router.rs` - Роутинг
-
-Определяет обработку VK long poll events:
-
-```rust
-impl MessageHandler for AppHandler<VkTransport> {
-    async fn handle(&self, event: &Event, api: &VkApi) -> VkResult<()>;
-}
-```
-
-**Порядок обработки:**
-1. Commands (имеют приоритет)
-2. Text messages (обрабатываются по состоянию)
-3. Callback queries (inline кнопки)
-
----
-
-### `bot/states/mod.rs` - Состояния диалога
-
-FSM (Finite State Machine) для управления диалогом:
-
-```rust
-pub enum AppState {
-    /// Ожидание команды или текста напоминания
-    Idle,
-    
-    /// Ожидание подтверждения текста перед LLM
-    AwaitingTextConfirmation { pending: PendingText },
-    
-    /// Ожидание подтверждения распарсенного напоминания
-    AwaitingReminderConfirmation { parsed: ParsedReminder },
-    
-    /// Ожидание ввода часового пояса
-    AwaitingUtc,
-    
-    /// Ожидание выбора кнопок snooze
-    AwaitingSnoozeButtons,
-    
-    /// Ожидание выбора auto-snooze
-    AwaitingAutoSnooze,
-    
-    /// Выбор напоминания для удаления
-    AwaitingDeleteSelection { reminders: Vec<(i32, String)> },
-}
-```
-
----
-
-### `bot/handlers/reminder.rs` - Создание напоминаний
-
-Основной flow создания напоминания:
-
-```
-1. Пользователь отправляет текст
-   │
-   ▼
-2. handle_idle_text()
-   ├── Показать: "Создать напоминание? [Да/Нет]"
-   └── State → AwaitingTextConfirmation
-   │
-   ▼
-3. handle_text_confirm()  (по нажатию "Да")
-   ├── Вызов LLM API: parse_reminder(text, timezone, datetime)
-   ├── Вычисление времени: calculate_reminder_time()
-   ├── Показать: "Подтвердите: ... [Создать/Изменить/Отменить]"
-   └── State → AwaitingReminderConfirmation
-   │
-   ▼
-4. handle_reminder_confirm()  (по нажатию "Создать")
-   ├── db.insert_reminder()
-   ├── Показать: "✅ Напоминание создано!"
-   └── State → Idle
-```
-
----
-
-### `scheduler/mod.rs` - Планировщик
-
-Фоновая задача отправки напоминаний:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   Scheduler Loop (каждые 10 сек)            │
-├─────────────────────────────────────────────────────────────┤
-│  1. claim_due_reminders(100)                                │
-│     └── MongoDB findOneAndUpdate: status → "processing"     │
-│                                                             │
-│  2. Параллельная отправка (max 20 concurrent)              │
-│     └── VK API: send_message()                              │
-│                                                             │
-│  3. Обработка результата:                                   │
-│     ├── OK → mark_sent() / update_time() (recurring)       │
-│     ├── Temp error → schedule_retry() (30s, 60s, 120s)     │
-│     └── Permanent error → mark_sent() (user blocked)       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Статусы напоминаний:**
-
-| Статус | Описание |
-|--------|----------|
-| `active` | Ожидает отправки |
-| `processing` | Взято в обработку (атомарный lock) |
-| `retry` | Ожидает retry после ошибки |
-| `sent` | Успешно отправлено |
-| `failed` | Превышено max retries (3) |
-
----
-
-### `api/payments.rs` - Платежи YooKassa
-
-Интеграция с платёжной системой YooKassa:
-
-```rust
-pub struct PaymentService {
-    shop_id: String,
-    secret_key: String,
-    db: Db,
-    cache: PaymentCache,  // Redis
-}
-
-impl PaymentService {
-    /// Создаёт платёж в YooKassa
-    pub async fn create_payment(&self, user_id: i64, tariff: &Tariff) 
-        -> Result<InitializedPayment>;
-    
-    /// Axum router для webhook /yookassa/webhook
-    pub fn router<T: BotTransport>(self: Arc<Self>, transport: T) -> Router;
-}
-```
-
-**Flow платежа:**
-1. Пользователь нажимает "Оплатить"
-2. `create_payment()` → YooKassa API
-3. Возвращается URL для оплаты
-4. Пользователь оплачивает
-5. YooKassa шлёт webhook → `handle_webhook()`
-6. Активируется подписка в БД
-
----
-
-## Переменные окружения
-
-| Переменная | Описание | Обязательна |
-|------------|----------|-------------|
-| `VK_ACCESS_TOKEN` | Access token сообщества VK | Да |
-| `VK_GROUP_ID` | ID сообщества VK | Да |
-| `MONGO_URI` | MongoDB connection string | Да |
-| `REDIS_URL` | Redis connection string | Нет |
-| `LLM_API_URL` | URL LLM API сервиса | Да |
-| `YK_SHOP_ID` | YooKassa Shop ID | Для платежей |
-| `YK_SECRET_KEY` | YooKassa Secret Key | Для платежей |
-| `IP` | IP для HTTP сервера | Нет (0.0.0.0) |
-| `PORT` | Порт HTTP сервера | Нет (3001) |
-| `ADMINS` | ID админов через запятую | Нет |
-| `RUST_LOG` | Уровень логирования | Нет (info) |
-
----
-
-## Запуск
+All-in-one local run:
 
 ```bash
-# 1. Запустить Ollama (LLM)
-ollama serve
-
-# 2. Запустить инфраструктуру
-docker compose up -d mongodb1 redis llm_api
-
-# 3. Запустить бот
 cargo run
 ```
 
----
-
-## Тесты
+Standalone split run:
 
 ```bash
-# Unit тесты
-cargo test
-
-# Тесты нагрузки scheduler
-MONGO_URI="mongodb://..." cargo test --test scheduler_load_test -- --nocapture
+BOT_SCHEDULER_ENABLED=false BOT_WEBHOOK_ENABLED=false cargo run --bin yanapomnyu_bot
+cargo run --bin scheduler
+PAYMENTS_ENABLED=true cargo run --bin webhook
 ```
+
+Docker Compose split run uses profile `standalone` and the same env switches.
+
+```bash
+BOT_SCHEDULER_ENABLED=false BOT_WEBHOOK_ENABLED=false docker compose --profile standalone up -d
+```
+
+## Quality Gates
+
+Run before committing runtime changes:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`cargo deny check` is optional until `cargo-deny` is installed and configured for the workspace.
+
+## VK Smoke Test
+
+This is a manual production/staging check because it needs live VK, MongoDB, Redis, LLM, and optional YooKassa credentials.
+
+| Scenario | Expected Result |
+|----------|-----------------|
+| `/start` | Bot creates or loads user profile and sends welcome/help keyboard. |
+| `/help` | Bot sends help text without errors. |
+| `/utc` | UTC keyboard is paginated and all buttons fit VK limits. |
+| `/setup` | Settings flow opens and dialogue state changes correctly. |
+| `/profile` | Profile displays timezone, subscription, and reminder counters. |
+| `/list` | Reminder list is shown or empty state is returned. |
+| `/pay` | Tariff selection opens; payment link works when payments are enabled. |
+| `/subs` | Channel subscription menu opens. |
+| `/ref` | Referral command returns current VK-safe placeholder/flow. |
+| Create reminder | Natural-language text creates a pending reminder via LLM and confirmation stores it. |
+| Snooze | Snooze buttons update reminder time and keep keyboard within VK limits. |
+| Due delivery | Scheduler claims due reminder once and sends it through VK transport. |

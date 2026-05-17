@@ -187,7 +187,7 @@ cargo build --release
 cargo test
 
 # Проверка кода
-cargo clippy
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Форматирование
 cargo fmt
@@ -203,6 +203,10 @@ RUST_LOG=debug cargo run --bin webhook
 ```
 
 Для production можно оставить all-in-one режим или вынести scheduler/webhook в отдельные сервисы: запустите compose с профилем `standalone` и установите `BOT_SCHEDULER_ENABLED=false`, `BOT_WEBHOOK_ENABLED=false` для основного `bot` процесса.
+
+### VK smoke-test
+
+Перед релизом проверьте в staging/production VK: `/start`, `/help`, `/utc`, `/setup`, `/profile`, `/list`, `/pay`, `/subs`, `/ref`, создание напоминания, snooze и доставку due reminder через scheduler.
 
 ### Структура БД
 
