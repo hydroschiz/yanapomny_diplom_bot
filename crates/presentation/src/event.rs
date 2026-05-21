@@ -2,6 +2,7 @@
 pub enum IncomingEvent {
     Message(IncomingMessage),
     Callback(IncomingCallback),
+    Group(IncomingGroupEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,23 @@ impl IncomingCallback {
             peer_id,
             user_id,
             payload: payload.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingGroupEvent {
+    pub peer_id: i64,
+    pub user_id: Option<i64>,
+    pub title: Option<String>,
+}
+
+impl IncomingGroupEvent {
+    pub fn new(peer_id: i64, user_id: Option<i64>, title: Option<String>) -> Self {
+        Self {
+            peer_id,
+            user_id,
+            title,
         }
     }
 }

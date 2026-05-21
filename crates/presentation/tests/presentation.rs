@@ -3,8 +3,10 @@ use presentation::keyboard::{
     pay_link_keyboard, utc_keyboard_page, utc_keyboard_page_count, OFFSETS,
 };
 use presentation::{
-    parse_command, parse_payload, BotCommand, CallbackPayload, IncomingCallback, IncomingMessage,
-    MessageRoute, Notification, Renderer, Router, TimezoneDisplay,
+    parse_channel_url, parse_command, parse_payload, BotCommand, CallbackPayload, CallbackRoute,
+    ChannelPlatform, ConversationState, IncomingCallback, IncomingEvent, IncomingGroupEvent,
+    IncomingMessage, MessageRoute, Notification, OutgoingCallbackAnswer, Renderer, RouteContext,
+    Router, TimezoneDisplay,
 };
 use transport_core::{TextFormat, TransportButton, TransportCapabilities};
 
@@ -61,6 +63,87 @@ fn router_routes_plain_text_by_dialog_state() {
 }
 
 #[test]
+fn incoming_event_covers_message_callback_and_group_events() {
+    let message = IncomingEvent::Message(IncomingMessage::new(1, 2, "text"));
+    let callback = IncomingEvent::Callback(IncomingCallback::new("event", 1, 2, "profile"));
+    let group = IncomingEvent::Group(IncomingGroupEvent::new(
+        2_000_000_001,
+        Some(2),
+        Some("chat".to_string()),
+    ));
+
+    assert!(matches!(message, IncomingEvent::Message(_)));
+    assert!(matches!(callback, IncomingEvent::Callback(_)));
+    assert!(matches!(group, IncomingEvent::Group(_)));
+}
+
+#[test]
+fn router_matrix_covers_extended_text_states() {
+    let router = Router;
+    let message = IncomingMessage::new(1, 2, "42");
+
+    let cases = [
+        (
+            ConversationState::AwaitingReminderEdit,
+            MessageRoute::ReminderEditText("42".to_string()),
+        ),
+        (
+            ConversationState::AwaitingReminderDeletion,
+            MessageRoute::ReminderDeletionInput("42".to_string()),
+        ),
+        (
+            ConversationState::AwaitingSubDeleteNum,
+            MessageRoute::ChannelDeletionInput("42".to_string()),
+        ),
+        (ConversationState::AwaitingPayment, MessageRoute::Ignored),
+    ];
+
+    for (state, expected) in cases {
+        assert_eq!(router.route_message_state(&message, state), expected);
+    }
+}
+
+#[test]
+fn router_extracts_group_mentions_and_ignores_unmentioned_group_text() {
+    let router = Router;
+    let mentioned =
+        IncomingMessage::new(2_000_000_001, 2, "команда @yanapomnyu_bot завтра в 9").group("chat");
+    let unmentioned = IncomingMessage::new(2_000_000_001, 2, "завтра в 9").group("chat");
+
+    assert_eq!(
+        router.route_message_with_context(
+            &mentioned,
+            ConversationState::Idle,
+            RouteContext::for_bot("yanapomnyu_bot"),
+        ),
+        MessageRoute::GroupReminderText("команда завтра в 9".to_string())
+    );
+    assert_eq!(
+        router.route_message_with_context(
+            &unmentioned,
+            ConversationState::Idle,
+            RouteContext::for_bot("yanapomnyu_bot"),
+        ),
+        MessageRoute::Ignored
+    );
+}
+
+#[test]
+fn router_routes_channel_urls_as_subscription_intents() {
+    let router = Router;
+    let message = IncomingMessage::new(1, 2, "https://www.twitch.tv/Streamer_Name");
+
+    assert_eq!(
+        router.route_message_state(&message, ConversationState::Idle),
+        MessageRoute::ChannelSubscriptionUrl(parse_channel_url("twitch.tv/Streamer_Name").unwrap())
+    );
+
+    let parsed = parse_channel_url("https://youtube.com/@yanapomnyu").unwrap();
+    assert_eq!(parsed.platform, ChannelPlatform::Youtube);
+    assert_eq!(parsed.channel_id, "@yanapomnyu");
+}
+
+#[test]
 fn payload_parser_handles_callbacks_with_arguments() {
     assert_eq!(parse_payload("utc_page:3"), CallbackPayload::UtcPage(3));
     assert_eq!(
@@ -92,6 +175,23 @@ fn router_uses_payload_parser_for_callbacks() {
         router.route_callback(&callback),
         CallbackPayload::ProfilePay
     );
+}
+
+#[test]
+fn router_maps_callbacks_to_transport_neutral_actions() {
+    let router = Router;
+    let cases = [
+        ("profile_pay", CallbackRoute::ShowPayMenu),
+        ("profile_list", CallbackRoute::ListReminders),
+        ("setup_snooze", CallbackRoute::StartSnoozeSetup),
+        ("pay_yk:12", CallbackRoute::StartYooKassaPayment(12)),
+        ("reminder_done:42", CallbackRoute::CompleteReminder(42)),
+    ];
+
+    for (payload, expected) in cases {
+        let callback = IncomingCallback::new("event", 1, 2, payload);
+        assert_eq!(router.route_callback_action(&callback), expected);
+    }
 }
 
 #[test]
@@ -157,4 +257,20 @@ fn renderer_keeps_html_when_transport_supports_html() {
 
     assert_eq!(content.format, TextFormat::Html);
     assert!(content.text.contains("<b>Действует до:</b> 01.01.2027"));
+}
+
+#[test]
+fn renderer_returns_transport_neutral_output_dtos() {
+    let response = Renderer
+        .render_response(10, Notification::Help, TransportCapabilities::vk_inline())
+        .with_callback_answer(OutgoingCallbackAnswer::new(
+            "event",
+            20,
+            10,
+            Some("ok".to_string()),
+        ));
+
+    assert_eq!(response.messages.len(), 1);
+    assert_eq!(response.messages[0].peer_id, 10);
+    assert_eq!(response.callback_answer.unwrap().event_id, "event");
 }

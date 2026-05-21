@@ -3,9 +3,12 @@ use transport_core::{
     strip_html, MessageContent, TextFormat, TransportCapabilities, TransportKeyboard,
 };
 
-use crate::keyboard::{
-    back_keyboard, pay_menu_keyboard, profile_back_keyboard, profile_keyboard, setup_keyboard,
-    utc_keyboard, utc_keyboard_page, utc_keyboard_page_count, KeyboardBuilder,
+use crate::{
+    keyboard::{
+        back_keyboard, pay_menu_keyboard, profile_back_keyboard, profile_keyboard, setup_keyboard,
+        utc_keyboard, utc_keyboard_page, utc_keyboard_page_count, KeyboardBuilder,
+    },
+    OutgoingMessage, RenderedResponse,
 };
 
 pub const UTC_PROMPT_MESSAGE: &str = r#"Укажите разницу во времени относительно UTC или просто назовите город, где вы находитесь — ИИ-помощник <b>Ян</b> определит всё сам.
@@ -192,6 +195,24 @@ impl Renderer {
             Notification::PlainText { text, keyboard } => self.message(text, keyboard, capabilities),
             Notification::Error(text) => self.message(format!("⚠️ {}", text), None, capabilities),
         }
+    }
+
+    pub fn render_message(
+        &self,
+        peer_id: i64,
+        notification: Notification,
+        capabilities: TransportCapabilities,
+    ) -> OutgoingMessage {
+        OutgoingMessage::new(peer_id, self.render(notification, capabilities))
+    }
+
+    pub fn render_response(
+        &self,
+        peer_id: i64,
+        notification: Notification,
+        capabilities: TransportCapabilities,
+    ) -> RenderedResponse {
+        RenderedResponse::message(peer_id, self.render(notification, capabilities))
     }
 
     fn message(
