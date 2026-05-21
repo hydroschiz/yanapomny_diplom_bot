@@ -2,6 +2,22 @@
 
 VK бот для создания и доставки напоминаний. После фаз 0-8 Telegram legacy удалён, основной runtime работает через VK long poll, а scheduler и YooKassa webhook можно запускать отдельно.
 
+## Cutover Baseline
+
+Текущее состояние после фаз 0-8 является переходным: root `src/*` всё ещё содержит рабочий VK runtime, handlers, production Mongo/YooKassa/LLM adapters и scheduler loops. Это больше не считается целевой архитектурой.
+
+Целевой cutover зафиксирован в `refactoring_plan.md`, раздел 12:
+
+```text
+crates/*   reusable domain/application/infrastructure/presentation/transport layers
+bins/*     production service composition roots
+src/*      legacy-only archive, не импортируется и не компилируется workspace после cutover
+```
+
+До завершения Phase 9.8 `cargo run` всё ещё запускает transitional root runtime. После cutover production commands должны стать `cargo run -p bot`, `cargo run -p scheduler`, `cargo run -p webhook`.
+
+Новые бизнес-сценарии, infrastructure adapters и transport adapters не должны развиваться в `src/*`; они должны добавляться в соответствующие `crates/*` и подключаться через `bins/*`.
+
 ## Runtime
 
 ```text
@@ -48,7 +64,8 @@ crates/infrastructure  In-memory/test adapters and shared infrastructure primiti
 crates/transport-core  Transport-neutral message, keyboard, capability traits
 crates/transport-vk    VK keyboard conversion and VK capability rules
 crates/presentation    Command/payload parsing, router intents, rendering, keyboard builders
-src/                   Production VK runtime and legacy-compatible persistence adapters
+bins/                  Target service composition roots: bot, scheduler, webhook
+src/                   Transitional runtime now; legacy-only archive after cutover
 ```
 
 Layering rules:
@@ -60,9 +77,35 @@ Layering rules:
 | `presentation` | `application` concepts, `transport-core` DTOs | VK API, MongoDB, Redis, YooKassa |
 | `transport-core` | none of the runtime adapters | VK, Telegram, MongoDB |
 | `transport-vk` | `transport-core` | business use cases, MongoDB |
-| `src/` runtime | all crates and concrete adapters | Telegram/teloxide legacy |
+| `bins/*` services | all crates and concrete adapters | business logic outside application use cases |
+| `src/*` transitional runtime | legacy/root crate only until cutover | new production logic |
 
-The root `src/` runtime still contains production adapters for the current deployment: MongoDB compatibility in `api/db.rs`, YooKassa in `api/payments.rs`, LLM HTTP in `api/llm_client.rs`, VK long poll routing in `bot/router.rs`, and scheduler loops in `scheduler/`.
+The root `src/` runtime still contains production adapters for the current deployment: MongoDB compatibility in `api/db.rs`, YooKassa in `api/payments.rs`, LLM HTTP in `api/llm_client.rs`, VK long poll routing in `bot/router.rs`, and scheduler loops in `scheduler/`. These modules are migration sources only; the target production path is `bins/*` using `crates/*`.
+
+## Target Service Layout
+
+| Service | Target Package | Responsibility |
+|---------|----------------|----------------|
+| VK bot | `bins/bot` | Configures VK transport, presentation router, application facade, infrastructure adapters; runs VK long poll. |
+| Scheduler | `bins/scheduler` | Runs due reminder delivery, subscription expiry jobs, channel checks through application use cases. |
+| Webhook | `bins/webhook` | Runs Axum YooKassa webhook endpoint and calls payment webhook use case. |
+
+Target dependency direction:
+
+```text
+bins/* -> infrastructure -> application -> domain
+bins/* -> presentation -> application -> domain
+bins/* -> transport-vk -> transport-core
+```
+
+Forbidden after cutover:
+
+```text
+crates/* -> src/*
+bins/* -> src/*
+application -> MongoDB/Redis/VK/YooKassa/reqwest/axum
+domain -> any I/O or persistence DTO
+```
 
 ## Message Flow
 
@@ -141,18 +184,26 @@ Optional:
 
 ## Deployment Modes
 
-All-in-one local run:
+Current transitional all-in-one local run:
 
 ```bash
 cargo run
 ```
 
-Standalone split run:
+Current transitional split run:
 
 ```bash
 BOT_SCHEDULER_ENABLED=false BOT_WEBHOOK_ENABLED=false cargo run --bin yanapomnyu_bot
 cargo run --bin scheduler
 PAYMENTS_ENABLED=true cargo run --bin webhook
+```
+
+Target post-cutover split run:
+
+```bash
+cargo run -p bot
+cargo run -p scheduler
+PAYMENTS_ENABLED=true cargo run -p webhook
 ```
 
 Docker Compose split run uses profile `standalone` and the same env switches.

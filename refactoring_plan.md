@@ -1,5 +1,7 @@
 # Архитектурный рефакторинг yanapomnyu_bot
 
+> Статус после фаз 0-8: проект находится в переходном состоянии. Telegram legacy удалён, workspace-крейты созданы, standalone `scheduler`/`webhook` добавлены, но production runtime всё ещё в значительной части исполняет root `src/*`. Ниже в разделе 12 зафиксирован обязательный cutover-план: `src/*` становится legacy-only и не используется, рабочие сервисы живут в `bins/*`, а бизнес-логика и адаптеры — в `crates/*`.
+
 ## 1. Цели
 
 - Реализовать чистую архитектуру и DDD в существующем Rust-проекте.
@@ -561,8 +563,396 @@ fn main():
 
 - Полноценный CQRS с разделением read/write моделей.
 - Event sourcing.
-- Микросервисы с разделением баз данных.
+- Микросервисы с разделением баз данных. Цель — monorepo modular architecture with separate runtime binaries, а не distributed system.
 - Замена MongoDB.
 - Полная локализация (i18n) — пока остаётся русский.
 - Сторонние DI-фреймворки. Композиция вручную в `bins/bot/main.rs`.
 - Изменение поведения LLM провайдера и Go-сервиса `llm_api`.
+
+## 12. Обновлённый cutover-план до целевой архитектуры
+
+### 12.1 Проблема текущего состояния
+
+Фазы 0-8 создали основу новой архитектуры, но не завершили cutover:
+
+- root crate `yanapomnyu_bot` всё ещё является production entrypoint;
+- `src/app.rs`, `src/bot/handlers/*`, `src/api/*`, `src/scheduler/*` всё ещё содержат значительную часть runtime и бизнес-логики;
+- `crates/application` содержит только часть use case-ов и почти не участвует в реальном `cargo run` path;
+- `crates/infrastructure` пока не является production-адаптером Mongo/Redis/YooKassa/LLM;
+- `bins/scheduler` и `bins/webhook` существуют как binaries root crate, но не как самостоятельные workspace packages;
+- модель MongoDB всё ещё legacy-oriented: `users`, `reminds`, `records`, `transactions`, а не целевая логическая модель `User`, `UserPreferences`, `Task`, `Reminder`, `DeliveryEvent`, `Subscription`, `Payment`.
+
+Вывод: текущее состояние считать transitional architecture. Финальная цель — убрать production-зависимость от root `src/*`.
+
+### 12.2 Финальная целевая структура
+
+```text
+yanapomnyu_bot/
+├── Cargo.toml                      # virtual workspace, без root package
+├── crates/
+│   ├── shared/                     # общие utility-типы без бизнес-логики
+│   ├── domain/                     # чистая доменная модель и правила
+│   ├── application/                # use cases, порты, application DTO
+│   ├── infrastructure/             # Mongo, Redis, YooKassa, LLM, Twitch, clock/id adapters
+│   ├── presentation/               # routing intents, rendering, keyboards, parsers
+│   ├── transport-core/             # transport-neutral traits/DTO/capabilities
+│   └── transport-vk/               # VK adapter: long poll, send, callback answer, keyboard conversion
+├── bins/
+│   ├── bot/                        # VK bot service composition root
+│   ├── scheduler/                  # background scheduler service composition root
+│   └── webhook/                    # YooKassa webhook service composition root
+└── src/                            # legacy-only archive, не member workspace и не импортируется
+```
+
+Финальные команды запуска:
+
+```bash
+cargo run -p bot
+cargo run -p scheduler
+cargo run -p webhook
+```
+
+Root `cargo run` больше не является production-командой. После cutover root `Cargo.toml` должен быть virtual workspace без `[package]`.
+
+### 12.3 Жёсткие архитектурные правила
+
+- `src/*` не используется новыми сервисами и крейтами.
+- `domain` не зависит от async runtime, MongoDB, Redis, VK, YooKassa, reqwest, axum, serde-BSON DTO.
+- `application` зависит от `domain` и объявляет порты, но не знает конкретных технологий.
+- `infrastructure` реализует порты `application` и содержит все DTO/mappers для Mongo/Redis/YooKassa/LLM/Twitch.
+- `presentation` не знает Mongo/Redis/YooKassa/VK SDK; она работает с transport-neutral событиями, командами, callback payloads, keyboard/message DTO.
+- `transport-vk` знает VK SDK и `transport-core`, но не знает бизнес use case-ов.
+- `bins/*` — единственное место, где связываются конкретные реализации.
+- Любой новый бизнес-сценарий сначала появляется в `application`, а не в handler/adapters.
+
+Проверки запрета legacy imports должны стать частью quality gate:
+
+```bash
+grep -R "yanapomnyu_bot::" bins crates
+grep -R "crate::api\|crate::bot\|crate::scheduler\|crate::transport" bins crates
+```
+
+Ожидаемый результат после cutover: пустой вывод.
+
+### 12.4 Phase 9.0 — Зафиксировать cutover baseline
+
+Цель: формально признать transitional state и запретить дальнейшее развитие root `src/*` как production-кода.
+
+Работы:
+
+- Обновить `refactoring_plan.md` этим разделом.
+- Обновить `ARCHITECTURE.md`: текущий `src/*` обозначить как legacy-only после cutover.
+- Добавить `docs/cutover_checklist.md` с правилами, командами проверки и порядком миграции.
+- Зафиксировать список production-сценариев, которые должны быть перенесены из `src/*`.
+
+Критерии готовности:
+
+- В документации явно написано: `src/*` не является целевой production архитектурой.
+- Есть список use case-ов и adapters, которые нужно перенести.
+- `cargo fmt --all`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` проходят.
+
+### 12.5 Phase 9.1 — Workspace service skeleton
+
+Цель: создать настоящие service packages вместо binaries root crate.
+
+Работы:
+
+- Добавить workspace members:
+  - `bins/bot`;
+  - `bins/scheduler`;
+  - `bins/webhook`.
+- Каждый service package получает собственный `Cargo.toml` и `src/main.rs`.
+- На первом шаге services могут быть минимальными stubs, но не должны импортировать root crate.
+- Начать перевод Dockerfile и compose на packages `bot`, `scheduler`, `webhook`.
+
+Критерии готовности:
+
+```bash
+cargo check -p bot
+cargo check -p scheduler
+cargo check -p webhook
+```
+
+Эти команды проходят, а `bins/*` не импортируют `yanapomnyu_bot::` и root `src/*`.
+
+### 12.6 Phase 9.2 — Domain model до схемы раздела 6
+
+Цель: привести `crates/domain` к целевой логической модели.
+
+Доменные сущности:
+
+- `User`;
+- `PlatformIdentity`;
+- `UserPreferences`;
+- `Task`;
+- `Reminder`;
+- `DeliveryEvent`;
+- `Subscription`;
+- `Payment`;
+- `Referral`;
+- `ExternalChannelSubscription`;
+- `IntentLog` — опционально для аудита LLM.
+
+Ключевое исправление модели:
+
+- `Task` — смысловая пользовательская задача;
+- `Reminder` — конкретное планируемое срабатывание;
+- `DeliveryEvent` — журнал попыток доставки;
+- текущая legacy-сущность `reminds` больше не должна быть доменной моделью.
+
+Критерии готовности:
+
+- `crates/domain` содержит чистую модель без I/O.
+- Есть unit tests на lifecycle: create task, schedule reminder, snooze, retry, complete, delete, recurring next occurrence.
+- Legacy BSON names (`remID`, `freestate`, `telegramPaymentChargeID`, `records`, `reminds`) отсутствуют в `domain`.
+
+### 12.7 Phase 9.3 — Application ports и use cases
+
+Цель: перенести прикладную логику из `src/bot/handlers/*`, `src/scheduler/*`, `src/api/payments.rs` в `crates/application`.
+
+Обязательные use cases:
+
+- `EnsureUserUseCase`;
+- `GetProfileUseCase`;
+- `UpdatePreferencesUseCase`;
+- `CreateTaskFromTextUseCase`;
+- `ConfirmParsedTaskUseCase`;
+- `CreateReminderUseCase`;
+- `ListTasksUseCase`;
+- `CompleteTaskUseCase`;
+- `DeleteTaskUseCase`;
+- `SnoozeReminderUseCase`;
+- `UpdateReminderTimeUseCase`;
+- `DeliverDueRemindersUseCase`;
+- `WarnExpiringSubscriptionsUseCase`;
+- `PurgeExpiredSubscriptionsUseCase`;
+- `CreatePaymentUseCase`;
+- `ProcessYooKassaWebhookUseCase`;
+- `CheckTwitchStreamsUseCase`;
+- `CreateReferralUseCase` / `ConsumeReferralRewardUseCase`.
+
+Обязательные ports:
+
+- `UserRepository`;
+- `UserPreferencesRepository`;
+- `TaskRepository`;
+- `ReminderRepository`;
+- `DeliveryEventRepository`;
+- `SubscriptionRepository`;
+- `PaymentRepository`;
+- `ReferralRepository`;
+- `ExternalChannelSubscriptionRepository`;
+- `DialogStateStore`;
+- `NaturalLanguageInterpreter`;
+- `PaymentGateway`;
+- `PaymentCache`;
+- `Notifier`;
+- `Clock`;
+- `IdGenerator`.
+
+Критерии готовности:
+
+- `application` не зависит от MongoDB, Redis, VK SDK, YooKassa SDK, reqwest, axum.
+- Все основные сценарии покрыты tests на in-memory ports.
+- Сценарии принимают команды/DTO и возвращают results/notifications, а не отправляют сообщения напрямую через VK SDK.
+
+### 12.8 Phase 9.4 — Infrastructure adapters
+
+Цель: перенести все concrete integrations из root `src/api/*` и scheduler integrations в `crates/infrastructure`.
+
+Перенос:
+
+- `src/api/db.rs` → `crates/infrastructure/src/mongo/*`;
+- `src/api/cache.rs` → `crates/infrastructure/src/redis/*`;
+- `src/api/payments.rs` → `crates/infrastructure/src/yookassa/*`;
+- `src/api/llm_client.rs`, `src/api/llm_models.rs`, `src/api/time_calculator.rs` → `crates/infrastructure/src/llm/*` + domain/application mapping;
+- Twitch HTTP client из `src/scheduler/channels.rs` → `crates/infrastructure/src/twitch/*`.
+
+Правила:
+
+- Mongo DTO живут только в `infrastructure`.
+- Legacy collection/field names остаются только в mappers.
+- Infrastructure реализует application ports, но не содержит сценариев общения с пользователем.
+
+Критерии готовности:
+
+- Production Mongo/Redis/YooKassa/LLM/Twitch adapters реализуют ports `application`.
+- Mapping tests покрывают legacy Mongo schema.
+- `src/api/*` больше не нужен для новых services.
+
+### 12.9 Phase 9.5 — Presentation as router/renderer boundary
+
+Цель: сделать `presentation` единственной точкой command/payload parsing, dialog routing intents, message rendering и keyboard building.
+
+Работы:
+
+- Ввести transport-neutral `IncomingEvent` для message/callback/group events.
+- Ввести output DTO: `OutgoingMessage`, `OutgoingCallbackAnswer`, `RenderedResponse`.
+- Перенести тексты, клавиатуры и callback payload rules из `src/bot/handlers/*` и `src/bot/keyboards/*`.
+- `presentation` вызывает application use cases через facade/ports или возвращает intents, которые исполняет service layer.
+- VK keyboard limits остаются capability-aware, без привязки к `vk-bot-api` в `presentation`.
+
+Критерии готовности:
+
+- `bins/bot` не вызывает root handlers.
+- `presentation` не зависит от VK SDK, MongoDB, Redis, YooKassa.
+- Есть matrix tests: command/callback/text-state → application action/rendered response.
+
+### 12.10 Phase 9.6 — VK transport adapter без бизнес-логики
+
+Цель: `transport-vk` становится настоящим platform adapter.
+
+Работы:
+
+- Перенести long poll event normalization из `src/bot/router.rs` в `transport-vk` или thin adapter module при `bins/bot`.
+- Перенести send/callback answer adapter из `src/transport/vk.rs`.
+- Убрать знание application use cases из VK transport.
+- Оставить VK-specific details: event extraction, peer/user IDs, callback event_id, keyboard conversion, API errors.
+
+Критерии готовности:
+
+- `transport-vk` зависит только от `transport-core` и VK SDK.
+- `application` и `presentation` не импортируют `vk-bot-api`.
+- VK можно заменить новым transport crate без изменения domain/application.
+
+### 12.11 Phase 9.7 — Real service binaries
+
+Цель: собрать рабочие сервисы из `crates/*` без root `src/*`.
+
+`bins/bot`:
+
+- читает config;
+- создаёт Mongo repositories, Redis cache, LLM interpreter, YooKassa gateway, VK transport;
+- собирает application facade;
+- запускает VK long poll;
+- не запускает scheduler/webhook в split mode.
+
+`bins/scheduler`:
+
+- читает config;
+- создаёт repositories, clock, notifier;
+- запускает loops вокруг:
+  - `DeliverDueRemindersUseCase`;
+  - `WarnExpiringSubscriptionsUseCase`;
+  - `PurgeExpiredSubscriptionsUseCase`;
+  - `CheckTwitchStreamsUseCase`.
+
+`bins/webhook`:
+
+- читает config;
+- создаёт payment use case;
+- запускает axum;
+- route вызывает `ProcessYooKassaWebhookUseCase`.
+
+Критерии готовности:
+
+```bash
+cargo run -p bot
+cargo run -p scheduler
+cargo run -p webhook
+```
+
+Все сервисы работают без root `src/*`.
+
+### 12.12 Phase 9.8 — Root package cutover
+
+Цель: физически отрубить root runtime от workspace.
+
+Работы:
+
+- Убрать `"."` из `[workspace].members`.
+- Удалить `[package]` из root `Cargo.toml`; root становится virtual workspace.
+- Оставить `src/` на диске как `legacy-only archive` либо переместить в `legacy/src`.
+- Удалить root binaries `src/main.rs`, `src/bin/scheduler.rs`, `src/bin/webhook.rs` из production build path.
+- Обновить Dockerfile/compose/README/ARCHITECTURE на `cargo run -p ...`.
+
+Критерии готовности:
+
+- `cargo check --workspace` не компилирует root `src/*`.
+- Удаление `src/` не ломает сборку workspace.
+- `grep` по imports из `src/*` в `crates` и `bins` пустой.
+
+### 12.13 Phase 9.9 — Database migration до целевой логической модели
+
+Цель: приблизить физическую Mongo schema к модели раздела 6 без одномоментного риска потери данных.
+
+Подход:
+
+1. Infrastructure сначала поддерживает legacy collections через mappers.
+2. Добавляются новые collections:
+   - `users`;
+   - `user_preferences`;
+   - `tasks`;
+   - `reminders`;
+   - `delivery_events`;
+   - `subscriptions`;
+   - `payments`;
+   - `referrals`;
+   - `external_channel_subscriptions`.
+3. Добавляется migration package или binary `bins/migrate`.
+4. Миграция имеет dry-run, idempotent run и backup instructions.
+5. После проверки services переключаются с legacy mapping на новую schema.
+
+Критерии готовности:
+
+- Новая logical model совпадает с диаграммой раздела 6.
+- `DeliveryEvent` реально фиксирует попытки доставки.
+- `Task` отделён от `Reminder`.
+- Есть migration tests на fixtures legacy BSON → new domain model.
+
+### 12.14 Phase 9.10 — Enforcement и CI quality gates
+
+Цель: не дать архитектуре снова расползтись.
+
+Добавить:
+
+- `cargo deny check` после установки/config;
+- `cargo machete` или аналог для unused deps;
+- banned imports check;
+- dependency graph check для crate boundaries;
+- `cargo fmt --all`;
+- `cargo check --workspace`;
+- `cargo test --workspace`;
+- `cargo clippy --workspace --all-targets -- -D warnings`;
+- integration tests service composition;
+- manual VK smoke-test checklist.
+
+Критерии готовности:
+
+- CI падает, если `application` тянет MongoDB/VK/YooKassa/reqwest/axum.
+- CI падает, если `domain` тянет I/O или serde-specific persistence DTO.
+- CI падает, если `bins/*` или `crates/*` импортируют legacy `src/*`.
+- CI падает, если transport содержит бизнес use cases.
+
+### 12.15 Порядок коммитов
+
+Дальнейшие изменения вести маленькими фазовыми коммитами:
+
+```text
+phase 9.0 architecture cutover baseline
+phase 9.1 add bins workspace skeleton
+phase 9.2 complete domain model
+phase 9.3 add application use cases
+phase 9.4 move infrastructure adapters
+phase 9.5 move presentation routing/rendering
+phase 9.6 implement VK transport adapter
+phase 9.7 wire real service binaries
+phase 9.8 remove root package from workspace
+phase 9.9 add database migration model
+phase 9.10 add enforcement and CI gates
+```
+
+Каждая фаза завершается минимум:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Если фаза меняет runtime service, дополнительно:
+
+```bash
+CARGO_TARGET_DIR=/tmp/opencode/yanapomnyu_bot_target cargo build --release --workspace
+```
