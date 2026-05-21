@@ -7,6 +7,8 @@ description = "VK transport adapter."
 publish = false
 
 [dependencies]
-shared = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 transport-core = { workspace = true }
 serde_json = { workspace = true }
+vk-bot-api = "1.0"

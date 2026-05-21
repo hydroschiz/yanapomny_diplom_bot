@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use transport_core::{TransportButton, TransportCapabilities, TransportKeyboard};
+use vk_bot_api::keyboard::{ButtonAction, ButtonColor, Keyboard as VkApiKeyboard, KeyboardButton};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VkKeyboard {
@@ -129,6 +130,20 @@ pub fn convert_keyboard(keyboard: &TransportKeyboard) -> VkKeyboard {
     }
 }
 
+pub fn convert_keyboard_to_vk_api(keyboard: &TransportKeyboard) -> VkApiKeyboard {
+    let keyboard = sanitize_keyboard(keyboard);
+    let mut vk_keyboard = VkApiKeyboard::new_inline();
+
+    for row in &keyboard.rows {
+        let vk_row = row.iter().map(convert_button_to_vk_api).collect::<Vec<_>>();
+        if !vk_row.is_empty() {
+            vk_keyboard = vk_keyboard.add_row(vk_row);
+        }
+    }
+
+    vk_keyboard
+}
+
 fn convert_button(button: &TransportButton) -> VkButton {
     match button {
         TransportButton::Callback { label, data } => VkButton::Callback {
@@ -139,6 +154,26 @@ fn convert_button(button: &TransportButton) -> VkButton {
         TransportButton::Url { label, url } => VkButton::OpenLink {
             label: label.clone(),
             link: url.clone(),
+        },
+    }
+}
+
+fn convert_button_to_vk_api(button: &TransportButton) -> KeyboardButton {
+    match button {
+        TransportButton::Callback { label, data } => KeyboardButton {
+            action: ButtonAction::Callback {
+                label: label.clone(),
+                payload: json!({ "action": data }),
+            },
+            color: Some(ButtonColor::Primary),
+        },
+        TransportButton::Url { label, url } => KeyboardButton {
+            action: ButtonAction::OpenLink {
+                link: url.clone(),
+                label: label.clone(),
+                payload: None,
+            },
+            color: None,
         },
     }
 }

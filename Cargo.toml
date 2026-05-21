@@ -50,6 +50,7 @@ default-run = "yanapomnyu_bot"
 domain = { workspace = true }
 presentation = { workspace = true }
 transport-core = { workspace = true }
+transport-vk = { workspace = true }
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 dotenvy = "0.15"

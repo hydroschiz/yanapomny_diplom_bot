@@ -1,11 +1,18 @@
 //! VK transport adapter.
 //!
-//! Phase 4 starts with VK keyboard normalization and capability-aware conversion.
-//! The legacy root crate still owns the live `vk-bot-api` runtime adapter until
-//! the composition root is moved to workspace crates.
+//! Owns VK SDK details: keyboard conversion, event normalization, message send,
+//! and callback answers. It intentionally has no application use-case knowledge.
 
+pub mod event;
 pub mod keyboard;
+pub mod sender;
 
-pub use keyboard::{
-    convert_keyboard, sanitize_keyboard, vk_inline_capabilities, VkButton, VkKeyboard,
+pub use event::{
+    callback_payload, is_group_peer, normalize_callback, normalize_event, normalize_message,
+    VkIncomingCallback, VkIncomingEvent, VkIncomingMessage,
 };
+pub use keyboard::{
+    convert_keyboard, convert_keyboard_to_vk_api, sanitize_keyboard, vk_inline_capabilities,
+    VkButton, VkKeyboard,
+};
+pub use sender::{random_id, VkTransport};

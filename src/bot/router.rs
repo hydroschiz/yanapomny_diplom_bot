@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use presentation::{parse_command, parse_payload, BotCommand, CallbackPayload};
+use transport_vk::{callback_payload, is_group_peer};
 use vk_bot_api::api::VkApi;
 use vk_bot_api::error::{VkError, VkResult};
 use vk_bot_api::handler::MessageHandler;
@@ -692,25 +693,6 @@ impl<T: BotTransport> MessageHandler for AppHandler<T> {
 
         result.map_err(|e| VkError::Custom(e.to_string()))
     }
-}
-
-fn is_group_peer(peer_id: i64) -> bool {
-    peer_id >= 2_000_000_000
-}
-
-fn callback_payload(event: &MessageEvent) -> Option<String> {
-    let payload = event.payload.as_ref()?;
-
-    payload
-        .get("action")
-        .or_else(|| payload.get("command"))
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            payload
-                .values()
-                .find_map(|value| value.as_str().map(ToOwned::to_owned))
-        })
 }
 
 async fn send_html_text<T: BotTransport>(transport: &T, peer_id: i64, text: &str) -> HandlerResult {
