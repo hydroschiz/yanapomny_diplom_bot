@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{scheduling::add_months, ChatId, Months, UserId};
+use crate::{scheduling::add_months, ChatId, Months, SubscriptionId, UserId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreeState {
@@ -42,6 +42,21 @@ pub struct SubscriptionPolicy {
     pub trial_days: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SubscriptionPlan {
+    #[default]
+    Basic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SubscriptionSource {
+    #[default]
+    Trial,
+    Payment,
+    ReferralReward,
+    AdminGrant,
+}
+
 impl Default for SubscriptionPolicy {
     fn default() -> Self {
         Self { trial_days: 7 }
@@ -50,7 +65,11 @@ impl Default for SubscriptionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscription {
+    pub id: Option<SubscriptionId>,
+    pub user_id: Option<UserId>,
     pub chat_id: ChatId,
+    pub plan: SubscriptionPlan,
+    pub source: SubscriptionSource,
     pub is_group: bool,
     pub group_name: String,
     pub owner_id: Option<UserId>,
@@ -62,7 +81,11 @@ pub struct Subscription {
 impl Subscription {
     pub fn new_trial(chat_id: ChatId, now: DateTime<Utc>, policy: SubscriptionPolicy) -> Self {
         Self {
+            id: None,
+            user_id: None,
             chat_id,
+            plan: SubscriptionPlan::Basic,
+            source: SubscriptionSource::Trial,
             is_group: false,
             group_name: String::new(),
             owner_id: None,
@@ -76,6 +99,14 @@ impl Subscription {
         self.is_group = true;
         self.group_name = name.into();
         self.owner_id = Some(owner_id);
+    }
+
+    pub fn assign_id(&mut self, id: SubscriptionId) {
+        self.id = Some(id);
+    }
+
+    pub fn link_user(&mut self, user_id: UserId) {
+        self.user_id = Some(user_id);
     }
 
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
@@ -107,6 +138,7 @@ impl Subscription {
         self.expires_at = add_months(base, months.value() as i32);
         self.active = true;
         self.free_state = FreeState::Paid;
+        self.source = SubscriptionSource::Payment;
         self.expires_at
     }
 }

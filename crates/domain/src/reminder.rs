@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{ChatId, DomainError, ReminderId, Schedule, TimePreferences};
+use crate::{ChatId, DomainError, ReminderId, Schedule, TaskId, TimePreferences};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReminderStatus {
@@ -66,6 +66,7 @@ impl Default for RetryPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reminder {
     pub id: Option<ReminderId>,
+    pub task_id: Option<TaskId>,
     pub chat_id: ChatId,
     pub text: String,
     pub schedule: Schedule,
@@ -86,6 +87,7 @@ impl Reminder {
     ) -> Self {
         Self {
             id: None,
+            task_id: None,
             chat_id,
             text: text.into(),
             schedule,
@@ -100,6 +102,10 @@ impl Reminder {
 
     pub fn assign_id(&mut self, id: ReminderId) {
         self.id = Some(id);
+    }
+
+    pub fn attach_task(&mut self, task_id: TaskId) {
+        self.task_id = Some(task_id);
     }
 
     pub fn claim(&mut self, now: DateTime<Utc>) -> Result<(), DomainError> {

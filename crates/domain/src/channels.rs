@@ -32,6 +32,8 @@ pub struct ChannelSubscription {
     pub is_live: bool,
 }
 
+pub type ExternalChannelSubscription = ChannelSubscription;
+
 impl ChannelSubscription {
     pub fn new(
         user_id: UserId,

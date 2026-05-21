@@ -1,10 +1,12 @@
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc, Weekday as ChronoWeekday};
 use domain::{
     scheduling::{calculate_from_time_spec, days_in_month},
-    ChatId, DomainError, FreeState, Months, RecurrenceFilter, RecurrencePattern, RecurrenceRule,
-    Reminder, ReminderStatus, RetryPolicy, Schedule, Subscription, SubscriptionPolicy,
-    SubscriptionStatus, TimeOfDay, TimePreferences, TimeSpec, TimeSpecType, UserId, UtcOffset,
-    Weekday,
+    ChatId, CommunicationPlatform, DeliveryChannel, DeliveryEvent, DeliveryResult, DomainError,
+    FreeState, Language, Money, Months, Payment, PaymentId, PaymentProvider, PlatformIdentity,
+    RecurrenceFilter, RecurrencePattern, RecurrenceRule, Reminder, ReminderId, ReminderStatus,
+    RetryPolicy, Schedule, Subscription, SubscriptionId, SubscriptionPolicy, SubscriptionSource,
+    SubscriptionStatus, Task, TaskId, TaskPriority, TaskStatus, TimeOfDay, TimePreferences,
+    TimeSpec, TimeSpecType, User, UserId, UserStatus, UtcOffset, Weekday,
 };
 
 #[test]
@@ -138,6 +140,67 @@ fn reminder_rejects_claim_before_due_time() {
 }
 
 #[test]
+fn user_identity_and_preferences_match_target_model() {
+    let now = fixed_now();
+    let mut user = User::registered(UserId::new(42), now);
+    let identity = PlatformIdentity::new(
+        user.id,
+        CommunicationPlatform::Vk,
+        "vk-42",
+        Some(ChatId::new(42)),
+        now,
+    );
+
+    user.add_identity(identity.clone());
+    user.add_identity(identity);
+
+    assert_eq!(user.status, UserStatus::Active);
+    assert_eq!(user.created_at, Some(now));
+    assert_eq!(user.identities.len(), 1);
+
+    let preferences = user.preferences();
+    assert_eq!(preferences.user_id, user.id);
+    assert_eq!(preferences.language, Language::Russian);
+    assert!(preferences.notification_policy.enabled);
+}
+
+#[test]
+fn task_reminder_and_delivery_event_lifecycle_are_separate() {
+    let now = fixed_now();
+    let due_at = now + Duration::hours(2);
+    let mut task = Task::new(UserId::new(7), "buy milk", now);
+    task.assign_id(TaskId::new(100));
+    task.set_priority(TaskPriority::High, now);
+    task.set_due_at(Some(due_at), now);
+
+    let task_id = task.id.unwrap();
+    let mut reminder = Reminder::new(
+        ChatId::new(7),
+        "buy milk",
+        Schedule::OneTime(TimeSpec::default()),
+        due_at,
+    );
+    reminder.assign_id(ReminderId::new(500));
+    reminder.attach_task(task_id);
+
+    let mut delivery =
+        DeliveryEvent::planned(reminder.id.unwrap(), DeliveryChannel::Vk, reminder.next_at);
+    delivery.mark_sent(due_at);
+
+    assert_eq!(task.status, TaskStatus::Active);
+    assert_eq!(task.priority, TaskPriority::High);
+    assert_eq!(reminder.task_id, Some(task_id));
+    assert_eq!(delivery.result, DeliveryResult::Sent);
+
+    task.complete(now).unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert!(matches!(
+        task.complete(now),
+        Err(DomainError::InvalidStatusTransition { .. })
+    ));
+}
+
+#[test]
 fn subscription_trial_and_extension_follow_policy() {
     let now = fixed_now();
     let mut subscription =
@@ -152,11 +215,34 @@ fn subscription_trial_and_extension_follow_policy() {
     let new_expiry = subscription.extend(Months::THREE, now);
 
     assert_eq!(subscription.free_state, FreeState::Paid);
+    assert_eq!(subscription.source, SubscriptionSource::Payment);
     assert!(new_expiry > now + Duration::days(90));
     assert!(matches!(
         subscription.status(now),
         SubscriptionStatus::Active { .. }
     ));
+}
+
+#[test]
+fn subscription_and_payment_can_be_linked_without_provider_leakage() {
+    let now = fixed_now();
+    let mut subscription =
+        Subscription::new_trial(ChatId::new(42), now, SubscriptionPolicy::default());
+    subscription.assign_id(SubscriptionId::new(77));
+    subscription.link_user(UserId::new(42));
+
+    let mut payment = Payment::new(
+        PaymentId::new("pay-1"),
+        PaymentProvider::YooKassa,
+        Money::rub(195),
+        now,
+    );
+    payment.link_subscription(subscription.id.unwrap());
+    payment.set_provider_payment_id("yk-1");
+
+    assert_eq!(subscription.user_id, Some(UserId::new(42)));
+    assert_eq!(payment.subscription_id, subscription.id);
+    assert_eq!(payment.provider.to_string(), "yookassa");
 }
 
 #[test]

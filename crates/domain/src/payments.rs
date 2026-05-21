@@ -2,7 +2,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-use crate::{DomainError, Months, PaymentId, UserId};
+use crate::{DomainError, Months, PaymentId, SubscriptionId, UserId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Currency {
@@ -76,6 +76,61 @@ pub enum PaymentStatus {
     Canceled,
     Failed,
     Unknown(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentProvider {
+    YooKassa,
+}
+
+impl fmt::Display for PaymentProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::YooKassa => f.write_str("yookassa"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Payment {
+    pub id: PaymentId,
+    pub subscription_id: Option<SubscriptionId>,
+    pub provider: PaymentProvider,
+    pub provider_payment_id: Option<String>,
+    pub amount: Money,
+    pub status: PaymentStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Payment {
+    pub fn new(
+        id: PaymentId,
+        provider: PaymentProvider,
+        amount: Money,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            subscription_id: None,
+            provider,
+            provider_payment_id: None,
+            amount,
+            status: PaymentStatus::Pending,
+            created_at,
+        }
+    }
+
+    pub fn link_subscription(&mut self, subscription_id: SubscriptionId) {
+        self.subscription_id = Some(subscription_id);
+    }
+
+    pub fn set_provider_payment_id(&mut self, value: impl Into<String>) {
+        self.provider_payment_id = Some(value.into());
+    }
+
+    pub fn update_status(&mut self, status: PaymentStatus) {
+        self.status = status;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

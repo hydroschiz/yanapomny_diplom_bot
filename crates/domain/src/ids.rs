@@ -39,7 +39,12 @@ macro_rules! id_type {
 
 id_type!(UserId, i64);
 id_type!(ChatId, i64);
+id_type!(TaskId, i64);
 id_type!(ReminderId, i32);
+id_type!(DeliveryEventId, i64);
+id_type!(SubscriptionId, i64);
+id_type!(ExternalChannelSubscriptionId, i64);
+id_type!(IntentLogId, i64);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PaymentId(String);
