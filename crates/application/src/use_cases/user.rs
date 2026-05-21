@@ -1,6 +1,10 @@
-use domain::{ChatId, SnoozeDuration, SubscriptionStatus, TimePreferences, User, UserId};
+use domain::{
+    ChatId, SnoozeDuration, SubscriptionStatus, TimePreferences, User, UserId, UserPreferences,
+};
 
-use crate::{ApplicationResult, Clock, SubscriptionRepository, UserRepository};
+use crate::{
+    ApplicationResult, Clock, SubscriptionRepository, UserPreferencesRepository, UserRepository,
+};
 
 pub struct EnsureUserUseCase<'a, R> {
     users: &'a R,
@@ -27,6 +31,27 @@ where
 
 pub struct SetUserTimezoneUseCase<'a, R> {
     users: &'a R,
+}
+
+pub struct UpdatePreferencesUseCase<'a, R> {
+    preferences: &'a R,
+}
+
+impl<'a, R> UpdatePreferencesUseCase<'a, R>
+where
+    R: UserPreferencesRepository,
+{
+    pub const fn new(preferences: &'a R) -> Self {
+        Self { preferences }
+    }
+
+    pub async fn execute(
+        &self,
+        preferences: UserPreferences,
+    ) -> ApplicationResult<UserPreferences> {
+        self.preferences.save_preferences(&preferences).await?;
+        Ok(preferences)
+    }
 }
 
 impl<'a, R> SetUserTimezoneUseCase<'a, R>

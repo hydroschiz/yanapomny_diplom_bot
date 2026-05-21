@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    ChannelSubscription, ChatId, PaymentId, PaymentTransaction, Referral, Reminder, ReminderId,
-    Subscription, User, UserId,
+    ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Payment, PaymentId,
+    PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription, Task, TaskId, User,
+    UserId, UserPreferences,
 };
 
 use crate::ApplicationResult;
@@ -14,6 +15,21 @@ pub trait UserRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait UserPreferencesRepository: Send + Sync {
+    async fn find_preferences(&self, user_id: UserId)
+        -> ApplicationResult<Option<UserPreferences>>;
+    async fn save_preferences(&self, preferences: &UserPreferences) -> ApplicationResult<()>;
+}
+
+#[async_trait]
+pub trait TaskRepository: Send + Sync {
+    async fn create_task(&self, task: Task) -> ApplicationResult<Task>;
+    async fn find_task(&self, id: TaskId) -> ApplicationResult<Option<Task>>;
+    async fn list_tasks(&self, user_id: UserId) -> ApplicationResult<Vec<Task>>;
+    async fn save_task(&self, task: &Task) -> ApplicationResult<()>;
+}
+
+#[async_trait]
 pub trait SubscriptionRepository: Send + Sync {
     async fn find_subscription(&self, chat_id: ChatId) -> ApplicationResult<Option<Subscription>>;
     async fn save_subscription(&self, subscription: &Subscription) -> ApplicationResult<()>;
@@ -21,8 +37,32 @@ pub trait SubscriptionRepository: Send + Sync {
 
 #[async_trait]
 pub trait ReminderRepository: Send + Sync {
+    async fn create_reminder(&self, reminder: Reminder) -> ApplicationResult<Reminder> {
+        self.save_reminder(&reminder).await?;
+        Ok(reminder)
+    }
+
     async fn find_reminder(&self, id: ReminderId) -> ApplicationResult<Option<Reminder>>;
     async fn save_reminder(&self, reminder: &Reminder) -> ApplicationResult<()>;
+
+    async fn claim_due_reminders(
+        &self,
+        _now: DateTime<Utc>,
+        _batch_size: usize,
+    ) -> ApplicationResult<Vec<Reminder>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+pub trait DeliveryEventRepository: Send + Sync {
+    async fn create_delivery_event(&self, event: DeliveryEvent)
+        -> ApplicationResult<DeliveryEvent>;
+    async fn save_delivery_event(&self, event: &DeliveryEvent) -> ApplicationResult<()>;
+    async fn list_delivery_events(
+        &self,
+        reminder_id: ReminderId,
+    ) -> ApplicationResult<Vec<DeliveryEvent>>;
 }
 
 #[async_trait]
@@ -34,6 +74,18 @@ pub trait ChannelSubscriptionRepository: Send + Sync {
     async fn save_channel_subscription(
         &self,
         subscription: &ChannelSubscription,
+    ) -> ApplicationResult<()>;
+}
+
+#[async_trait]
+pub trait ExternalChannelSubscriptionRepository: Send + Sync {
+    async fn list_external_channel_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Vec<ExternalChannelSubscription>>;
+    async fn save_external_channel_subscription(
+        &self,
+        subscription: &ExternalChannelSubscription,
     ) -> ApplicationResult<()>;
 }
 
@@ -60,6 +112,12 @@ pub trait PaymentTransactionRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait PaymentRepository: Send + Sync {
+    async fn find_payment(&self, payment_id: &PaymentId) -> ApplicationResult<Option<Payment>>;
+    async fn save_payment(&self, payment: &Payment) -> ApplicationResult<()>;
+}
+
+#[async_trait]
 pub trait PaymentCachePort: Send + Sync {
     async fn remember_pending_payment(
         &self,
@@ -75,8 +133,26 @@ pub trait PaymentGatewayPort: Send + Sync {
 }
 
 #[async_trait]
+pub trait PaymentGateway: Send + Sync {
+    async fn create_payment(&self, payment: &Payment) -> ApplicationResult<String>;
+}
+
+#[async_trait]
 pub trait NaturalLanguageReminderParser: Send + Sync {
     async fn parse_reminder(&self, text: &str, user: &User) -> ApplicationResult<domain::Schedule>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpretedTask {
+    pub title: String,
+    pub description: Option<String>,
+    pub schedule: Schedule,
+    pub trigger_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait NaturalLanguageInterpreter: Send + Sync {
+    async fn interpret_task(&self, text: &str, user: &User) -> ApplicationResult<InterpretedTask>;
 }
 
 #[async_trait]

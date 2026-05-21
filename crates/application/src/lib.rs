@@ -9,12 +9,20 @@ pub mod use_cases;
 
 pub use error::{ApplicationError, ApplicationResult};
 pub use ports::{
-    ChannelSubscriptionRepository, Clock, DialogState, DialogStateStore, IdGenerator,
-    NaturalLanguageReminderParser, Notification, Notifier, PaymentCachePort, PaymentGatewayPort,
+    ChannelSubscriptionRepository, Clock, DeliveryEventRepository, DialogState, DialogStateStore,
+    ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
+    NaturalLanguageInterpreter, NaturalLanguageReminderParser, Notification, Notifier,
+    PaymentCachePort, PaymentGateway, PaymentGatewayPort, PaymentRepository,
     PaymentTransactionRepository, ProfileNotification, ReferralRepository, ReminderRepository,
-    StreamPlatformGateway, SubscriptionRepository, UserRepository,
+    StreamPlatformGateway, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
+    UserRepository,
 };
 pub use use_cases::{
-    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ProfileView,
-    SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase, SetUserTimezoneUseCase,
+    active_tasks, CheckTwitchStreamsUseCase, CompleteTaskUseCase, ConsumeReferralRewardUseCase,
+    CreatePaymentCommand, CreatePaymentUseCase, CreateReferralUseCase, CreateReminderCommand,
+    CreateReminderUseCase, CreateTaskCommand, CreateTaskFromTextUseCase, CreateTaskUseCase,
+    CreatedPayment, DeleteTaskUseCase, DeliverDueRemindersUseCase, DeliveryReport,
+    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ListTasksUseCase,
+    ProcessYooKassaWebhookUseCase, ProfileView, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
+    SetUserTimezoneUseCase, SnoozeReminderUseCase, UpdatePreferencesUseCase,
 };
