@@ -1,0 +1,1707 @@
+use application::{
+    ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
+    ExternalChannelSubscriptionRepository, PaymentRepository, ReferralRepository,
+    ReminderRepository, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
+    UserRepository,
+};
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
+use mongodb::{
+    bson::{
+        doc,
+        serde_helpers::{
+            chrono_datetime_as_bson_datetime, chrono_datetime_as_bson_datetime_optional,
+        },
+    },
+    options::{FindOneAndUpdateOptions, ReturnDocument},
+    Client, Collection, Database,
+};
+use serde::{Deserialize, Serialize};
+
+use domain::{
+    ChannelSubscription, ChatId, CommunicationPlatform, Currency, DayPosition, DeliveryChannel,
+    DeliveryEvent, DeliveryEventId, DeliveryResult, ExternalChannelSubscription, FreeState,
+    IntervalUnit, Language, Money, NotificationPolicy, OffsetDirection, Payment, PaymentId,
+    PaymentProvider, PaymentStatus, Platform, PlatformIdentity, RecurrenceFilter,
+    RecurrencePattern, RecurrenceRule, Referral, Reminder, ReminderId, ReminderStatus, Schedule,
+    SnoozeDuration, SnoozePolicy, Subscription, SubscriptionId, SubscriptionPlan,
+    SubscriptionPolicy, SubscriptionSource, Task, TaskId, TaskPriority, TaskStatus, TimeOfDay,
+    TimePreferences, TimeSpec, TimeSpecType, TimeZone, User, UserId, UserPreferences, UserStatus,
+    UtcOffset, Weekday,
+};
+
+const USERS_COLLECTION: &str = "users";
+const USER_PREFERENCES_COLLECTION: &str = "user_preferences";
+const TASKS_COLLECTION: &str = "tasks";
+const REMINDERS_COLLECTION: &str = "reminders";
+const DELIVERY_EVENTS_COLLECTION: &str = "delivery_events";
+const SUBSCRIPTIONS_COLLECTION: &str = "subscriptions";
+const PAYMENTS_COLLECTION: &str = "payments";
+const REFERRALS_COLLECTION: &str = "referrals";
+const EXTERNAL_CHANNEL_SUBSCRIPTIONS_COLLECTION: &str = "external_channel_subscriptions";
+
+#[derive(Clone)]
+pub struct MongoStore {
+    db: Database,
+}
+
+impl MongoStore {
+    pub async fn connect(uri: &str, db_name: &str) -> ApplicationResult<Self> {
+        let client = Client::with_uri_str(uri).await.map_err(repo_err)?;
+        Ok(Self {
+            db: client.database(db_name),
+        })
+    }
+
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+
+    fn users(&self) -> Collection<UserDto> {
+        self.db.collection(USERS_COLLECTION)
+    }
+
+    fn user_preferences(&self) -> Collection<UserPreferencesDto> {
+        self.db.collection(USER_PREFERENCES_COLLECTION)
+    }
+
+    fn tasks(&self) -> Collection<TaskDto> {
+        self.db.collection(TASKS_COLLECTION)
+    }
+
+    fn reminders(&self) -> Collection<ReminderDto> {
+        self.db.collection(REMINDERS_COLLECTION)
+    }
+
+    fn delivery_events(&self) -> Collection<DeliveryEventDto> {
+        self.db.collection(DELIVERY_EVENTS_COLLECTION)
+    }
+
+    fn subscriptions(&self) -> Collection<SubscriptionDto> {
+        self.db.collection(SUBSCRIPTIONS_COLLECTION)
+    }
+
+    fn payments(&self) -> Collection<PaymentDto> {
+        self.db.collection(PAYMENTS_COLLECTION)
+    }
+
+    fn referrals(&self) -> Collection<ReferralDto> {
+        self.db.collection(REFERRALS_COLLECTION)
+    }
+
+    fn external_channel_subscriptions(&self) -> Collection<ExternalChannelSubscriptionDto> {
+        self.db
+            .collection(EXTERNAL_CHANNEL_SUBSCRIPTIONS_COLLECTION)
+    }
+}
+
+#[async_trait]
+impl UserRepository for MongoStore {
+    async fn find_user(&self, id: UserId) -> ApplicationResult<Option<User>> {
+        let dto = self
+            .users()
+            .find_one(doc! { "id": id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_user(&self, user: &User) -> ApplicationResult<()> {
+        let dto = UserDto::from(user.clone());
+        self.users()
+            .replace_one(
+                doc! { "id": dto.id },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl UserPreferencesRepository for MongoStore {
+    async fn find_preferences(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Option<UserPreferences>> {
+        let dto = self
+            .user_preferences()
+            .find_one(doc! { "userId": user_id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_preferences(&self, preferences: &UserPreferences) -> ApplicationResult<()> {
+        let dto = UserPreferencesDto::from(preferences.clone());
+        self.user_preferences()
+            .replace_one(
+                doc! { "userId": dto.user_id },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TaskRepository for MongoStore {
+    async fn create_task(&self, mut task: Task) -> ApplicationResult<Task> {
+        if task.id.is_none() {
+            task.assign_id(TaskId::new(generated_i64_id()));
+        }
+        let dto = TaskDto::from(task.clone());
+        self.tasks().insert_one(dto, None).await.map_err(repo_err)?;
+        Ok(task)
+    }
+
+    async fn find_task(&self, id: TaskId) -> ApplicationResult<Option<Task>> {
+        let dto = self
+            .tasks()
+            .find_one(doc! { "id": id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn list_tasks(&self, user_id: UserId) -> ApplicationResult<Vec<Task>> {
+        self.tasks()
+            .find(doc! { "userId": user_id.value() }, None)
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+
+    async fn save_task(&self, task: &Task) -> ApplicationResult<()> {
+        let id = task.id.ok_or_else(|| repo_message("task id is required"))?;
+        let dto = TaskDto::from(task.clone());
+        self.tasks()
+            .replace_one(
+                doc! { "id": id.value() },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderRepository for MongoStore {
+    async fn create_reminder(&self, mut reminder: Reminder) -> ApplicationResult<Reminder> {
+        if reminder.id.is_none() {
+            reminder.assign_id(ReminderId::new(generated_i32_id()));
+        }
+        let dto = ReminderDto::from(reminder.clone());
+        self.reminders()
+            .insert_one(dto, None)
+            .await
+            .map_err(repo_err)?;
+        Ok(reminder)
+    }
+
+    async fn find_reminder(&self, id: ReminderId) -> ApplicationResult<Option<Reminder>> {
+        let dto = self
+            .reminders()
+            .find_one(doc! { "id": id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_reminder(&self, reminder: &Reminder) -> ApplicationResult<()> {
+        let id = reminder
+            .id
+            .ok_or_else(|| repo_message("reminder id is required"))?;
+        let dto = ReminderDto::from(reminder.clone());
+        self.reminders()
+            .replace_one(
+                doc! { "id": id.value() },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+
+    async fn claim_due_reminders(
+        &self,
+        now: DateTime<Utc>,
+        batch_size: usize,
+    ) -> ApplicationResult<Vec<Reminder>> {
+        let now_bson = mongodb::bson::DateTime::from_chrono(now);
+        let filter = doc! {
+            "$or": [
+                { "status": "active", "nextAt": { "$lte": now_bson } },
+                { "status": "retry", "retryAt": { "$lte": now_bson } }
+            ]
+        };
+        let update = doc! { "$set": { "status": "processing" } };
+        let options = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        let mut claimed = Vec::new();
+
+        for _ in 0..batch_size {
+            let Some(dto) = self
+                .reminders()
+                .find_one_and_update(filter.clone(), update.clone(), options.clone())
+                .await
+                .map_err(repo_err)?
+            else {
+                break;
+            };
+            claimed.push(dto.try_into()?);
+        }
+
+        Ok(claimed)
+    }
+}
+
+#[async_trait]
+impl DeliveryEventRepository for MongoStore {
+    async fn create_delivery_event(
+        &self,
+        mut event: DeliveryEvent,
+    ) -> ApplicationResult<DeliveryEvent> {
+        if event.id.is_none() {
+            event.assign_id(DeliveryEventId::new(generated_i64_id()));
+        }
+        let dto = DeliveryEventDto::from(event.clone());
+        self.delivery_events()
+            .insert_one(dto, None)
+            .await
+            .map_err(repo_err)?;
+        Ok(event)
+    }
+
+    async fn save_delivery_event(&self, event: &DeliveryEvent) -> ApplicationResult<()> {
+        let id = event
+            .id
+            .ok_or_else(|| repo_message("delivery event id is required"))?;
+        let dto = DeliveryEventDto::from(event.clone());
+        self.delivery_events()
+            .replace_one(
+                doc! { "id": id.value() },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+
+    async fn list_delivery_events(
+        &self,
+        reminder_id: ReminderId,
+    ) -> ApplicationResult<Vec<DeliveryEvent>> {
+        self.delivery_events()
+            .find(doc! { "reminderId": reminder_id.value() }, None)
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+}
+
+#[async_trait]
+impl SubscriptionRepository for MongoStore {
+    async fn find_subscription(&self, chat_id: ChatId) -> ApplicationResult<Option<Subscription>> {
+        let dto = self
+            .subscriptions()
+            .find_one(doc! { "chatId": chat_id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_subscription(&self, subscription: &Subscription) -> ApplicationResult<()> {
+        let dto = SubscriptionDto::from(subscription.clone());
+        self.subscriptions()
+            .replace_one(
+                doc! { "chatId": dto.chat_id },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PaymentRepository for MongoStore {
+    async fn find_payment(&self, payment_id: &PaymentId) -> ApplicationResult<Option<Payment>> {
+        let dto = self
+            .payments()
+            .find_one(doc! { "id": payment_id.as_str() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_payment(&self, payment: &Payment) -> ApplicationResult<()> {
+        let dto = PaymentDto::from(payment.clone());
+        self.payments()
+            .replace_one(
+                doc! { "id": dto.id.clone() },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReferralRepository for MongoStore {
+    async fn find_referral(
+        &self,
+        referrer_id: UserId,
+        invited_id: UserId,
+    ) -> ApplicationResult<Option<Referral>> {
+        let dto = self
+            .referrals()
+            .find_one(
+                doc! { "referrerId": referrer_id.value(), "invitedId": invited_id.value() },
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn save_referral(&self, referral: &Referral) -> ApplicationResult<()> {
+        let dto = ReferralDto::from(referral.clone());
+        self.referrals()
+            .replace_one(
+                doc! { "referrerId": dto.referrer_id, "invitedId": dto.invited_id },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChannelSubscriptionRepository for MongoStore {
+    async fn list_channel_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Vec<ChannelSubscription>> {
+        self.list_external_channel_subscriptions(user_id).await
+    }
+
+    async fn save_channel_subscription(
+        &self,
+        subscription: &ChannelSubscription,
+    ) -> ApplicationResult<()> {
+        self.save_external_channel_subscription(subscription).await
+    }
+}
+
+#[async_trait]
+impl ExternalChannelSubscriptionRepository for MongoStore {
+    async fn list_external_channel_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Vec<ExternalChannelSubscription>> {
+        self.external_channel_subscriptions()
+            .find(doc! { "userId": user_id.value() }, None)
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+
+    async fn save_external_channel_subscription(
+        &self,
+        subscription: &ExternalChannelSubscription,
+    ) -> ApplicationResult<()> {
+        let dto = ExternalChannelSubscriptionDto::from(subscription.clone());
+        self.external_channel_subscriptions()
+            .replace_one(
+                doc! { "userId": dto.user_id, "platform": dto.platform.clone(), "channelId": dto.channel_id.clone() },
+                dto,
+                mongodb::options::ReplaceOptions::builder().upsert(true).build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserDto {
+    id: i64,
+    status: String,
+    #[serde(default, with = "chrono_datetime_as_bson_datetime_optional")]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    identities: Vec<PlatformIdentityDto>,
+    #[serde(rename = "timePreferences")]
+    time_preferences: TimePreferencesDto,
+    #[serde(rename = "snoozeButtons", default)]
+    snooze_buttons: Vec<u32>,
+    #[serde(rename = "autoSnooze")]
+    auto_snooze: u32,
+    #[serde(rename = "paymentInfo", default)]
+    payment_info: Option<String>,
+}
+
+impl From<User> for UserDto {
+    fn from(value: User) -> Self {
+        Self {
+            id: value.id.value(),
+            status: user_status_to_str(value.status).to_string(),
+            created_at: value.created_at,
+            identities: value
+                .identities
+                .into_iter()
+                .map(PlatformIdentityDto::from)
+                .collect(),
+            time_preferences: TimePreferencesDto::from(value.time_preferences),
+            snooze_buttons: value
+                .snooze_buttons
+                .into_iter()
+                .map(SnoozeDuration::minutes)
+                .collect(),
+            auto_snooze: value.auto_snooze.minutes(),
+            payment_info: value.payment_info,
+        }
+    }
+}
+
+impl TryFrom<UserDto> for User {
+    type Error = ApplicationError;
+
+    fn try_from(value: UserDto) -> Result<Self, Self::Error> {
+        let user_id = UserId::new(value.id);
+        Ok(Self {
+            id: user_id,
+            status: user_status_from_str(&value.status),
+            created_at: value.created_at,
+            identities: value
+                .identities
+                .into_iter()
+                .map(|identity| identity.into_domain(user_id))
+                .collect::<ApplicationResult<_>>()?,
+            time_preferences: value.time_preferences.try_into()?,
+            snooze_buttons: value
+                .snooze_buttons
+                .into_iter()
+                .map(SnoozeDuration::from_minutes)
+                .collect(),
+            auto_snooze: SnoozeDuration::from_minutes(value.auto_snooze),
+            payment_info: value.payment_info,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlatformIdentityDto {
+    platform: String,
+    #[serde(rename = "externalId")]
+    external_id: String,
+    #[serde(rename = "chatId", default)]
+    chat_id: Option<i64>,
+    #[serde(rename = "connectedAt", with = "chrono_datetime_as_bson_datetime")]
+    connected_at: DateTime<Utc>,
+}
+
+impl From<domain::PlatformIdentity> for PlatformIdentityDto {
+    fn from(value: domain::PlatformIdentity) -> Self {
+        Self {
+            platform: "vk".to_string(),
+            external_id: value.external_id,
+            chat_id: value.chat_id.map(ChatId::value),
+            connected_at: value.connected_at,
+        }
+    }
+}
+
+impl PlatformIdentityDto {
+    fn into_domain(self, user_id: UserId) -> ApplicationResult<PlatformIdentity> {
+        Ok(PlatformIdentity::new(
+            user_id,
+            communication_platform_from_str(&self.platform)?,
+            self.external_id,
+            self.chat_id.map(ChatId::new),
+            self.connected_at,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserPreferencesDto {
+    #[serde(rename = "userId")]
+    user_id: i64,
+    #[serde(rename = "timePreferences")]
+    time_preferences: TimePreferencesDto,
+    language: String,
+    #[serde(rename = "snoozePolicy")]
+    snooze_policy: SnoozePolicyDto,
+    #[serde(rename = "notificationPolicy")]
+    notification_policy: NotificationPolicyDto,
+}
+
+impl From<UserPreferences> for UserPreferencesDto {
+    fn from(value: UserPreferences) -> Self {
+        Self {
+            user_id: value.user_id.value(),
+            time_preferences: TimePreferencesDto::from(value.time_preferences),
+            language: language_to_str(value.language).to_string(),
+            snooze_policy: SnoozePolicyDto::from(value.snooze_policy),
+            notification_policy: NotificationPolicyDto::from(value.notification_policy),
+        }
+    }
+}
+
+impl TryFrom<UserPreferencesDto> for UserPreferences {
+    type Error = ApplicationError;
+
+    fn try_from(value: UserPreferencesDto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            user_id: UserId::new(value.user_id),
+            time_preferences: value.time_preferences.try_into()?,
+            language: language_from_str(&value.language),
+            snooze_policy: value.snooze_policy.into(),
+            notification_policy: value.notification_policy.into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimePreferencesDto {
+    morning: String,
+    afternoon: String,
+    evening: String,
+    #[serde(rename = "utcOffsetSeconds")]
+    utc_offset_seconds: i32,
+    #[serde(rename = "timeZone", default)]
+    time_zone: Option<String>,
+}
+
+impl From<TimePreferences> for TimePreferencesDto {
+    fn from(value: TimePreferences) -> Self {
+        Self {
+            morning: value.morning.format("%H:%M").to_string(),
+            afternoon: value.afternoon.format("%H:%M").to_string(),
+            evening: value.evening.format("%H:%M").to_string(),
+            utc_offset_seconds: value.utc_offset.seconds(),
+            time_zone: match value.time_zone {
+                TimeZone::Utc => Some("UTC".to_string()),
+                TimeZone::Fixed(offset) => Some(offset.to_string()),
+                TimeZone::Iana(name) => Some(name),
+            },
+        }
+    }
+}
+
+impl TryFrom<TimePreferencesDto> for TimePreferences {
+    type Error = ApplicationError;
+
+    fn try_from(value: TimePreferencesDto) -> Result<Self, Self::Error> {
+        let offset = UtcOffset::from_seconds(value.utc_offset_seconds)?;
+        Ok(TimePreferences::from_fixed_offset_strings(
+            &value.morning,
+            &value.afternoon,
+            &value.evening,
+            &offset.to_string(),
+        )?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnoozePolicyDto {
+    buttons: Vec<u32>,
+    #[serde(rename = "autoSnooze")]
+    auto_snooze: u32,
+}
+
+impl From<SnoozePolicy> for SnoozePolicyDto {
+    fn from(value: SnoozePolicy) -> Self {
+        Self {
+            buttons: value
+                .buttons
+                .into_iter()
+                .map(SnoozeDuration::minutes)
+                .collect(),
+            auto_snooze: value.auto_snooze.minutes(),
+        }
+    }
+}
+
+impl From<SnoozePolicyDto> for SnoozePolicy {
+    fn from(value: SnoozePolicyDto) -> Self {
+        Self {
+            buttons: value
+                .buttons
+                .into_iter()
+                .map(SnoozeDuration::from_minutes)
+                .collect(),
+            auto_snooze: SnoozeDuration::from_minutes(value.auto_snooze),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NotificationPolicyDto {
+    enabled: bool,
+}
+
+impl From<NotificationPolicy> for NotificationPolicyDto {
+    fn from(value: NotificationPolicy) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl From<NotificationPolicyDto> for NotificationPolicy {
+    fn from(value: NotificationPolicyDto) -> Self {
+        Self {
+            enabled: value.enabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskDto {
+    id: Option<i64>,
+    #[serde(rename = "userId")]
+    user_id: i64,
+    title: String,
+    description: Option<String>,
+    status: String,
+    priority: String,
+    #[serde(
+        rename = "dueAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    due_at: Option<DateTime<Utc>>,
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    created_at: DateTime<Utc>,
+    #[serde(rename = "updatedAt", with = "chrono_datetime_as_bson_datetime")]
+    updated_at: DateTime<Utc>,
+}
+
+impl From<Task> for TaskDto {
+    fn from(value: Task) -> Self {
+        Self {
+            id: value.id.map(TaskId::value),
+            user_id: value.user_id.value(),
+            title: value.title,
+            description: value.description,
+            status: task_status_to_str(value.status).to_string(),
+            priority: task_priority_to_str(value.priority).to_string(),
+            due_at: value.due_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl TryFrom<TaskDto> for Task {
+    type Error = ApplicationError;
+
+    fn try_from(value: TaskDto) -> Result<Self, Self::Error> {
+        let mut task = Task::new(UserId::new(value.user_id), value.title, value.created_at);
+        if let Some(id) = value.id {
+            task.assign_id(TaskId::new(id));
+        }
+        task.description = value.description;
+        task.status = task_status_from_str(&value.status);
+        task.priority = task_priority_from_str(&value.priority);
+        task.due_at = value.due_at;
+        task.updated_at = value.updated_at;
+        Ok(task)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReminderDto {
+    id: Option<i32>,
+    #[serde(rename = "taskId", default)]
+    task_id: Option<i64>,
+    #[serde(rename = "chatId")]
+    chat_id: i64,
+    text: String,
+    schedule: ScheduleDto,
+    #[serde(rename = "nextAt", with = "chrono_datetime_as_bson_datetime")]
+    next_at: DateTime<Utc>,
+    status: String,
+    #[serde(rename = "messageId", default)]
+    message_id: Option<i32>,
+    #[serde(
+        rename = "snoozeUntil",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    snooze_until: Option<DateTime<Utc>>,
+    #[serde(rename = "retryCount")]
+    retry_count: u32,
+    #[serde(
+        rename = "retryAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    retry_at: Option<DateTime<Utc>>,
+}
+
+impl From<Reminder> for ReminderDto {
+    fn from(value: Reminder) -> Self {
+        Self {
+            id: value.id.map(ReminderId::value),
+            task_id: value.task_id.map(TaskId::value),
+            chat_id: value.chat_id.value(),
+            text: value.text,
+            schedule: ScheduleDto::from(value.schedule),
+            next_at: value.next_at,
+            status: reminder_status_to_str(&value.status).to_string(),
+            message_id: value.message_id,
+            snooze_until: value.snooze_until,
+            retry_count: value.retry_count,
+            retry_at: value.retry_at,
+        }
+    }
+}
+
+impl TryFrom<ReminderDto> for Reminder {
+    type Error = ApplicationError;
+
+    fn try_from(value: ReminderDto) -> Result<Self, Self::Error> {
+        let mut reminder = Reminder::new(
+            ChatId::new(value.chat_id),
+            value.text,
+            value.schedule.try_into()?,
+            value.next_at,
+        );
+        if let Some(id) = value.id {
+            reminder.assign_id(ReminderId::new(id));
+        }
+        if let Some(task_id) = value.task_id {
+            reminder.attach_task(TaskId::new(task_id));
+        }
+        reminder.status =
+            reminder_status_from_parts(&value.status, value.retry_count, value.retry_at);
+        reminder.message_id = value.message_id;
+        reminder.snooze_until = value.snooze_until;
+        reminder.retry_count = value.retry_count;
+        reminder.retry_at = value.retry_at;
+        Ok(reminder)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScheduleDto {
+    kind: String,
+    time: TimeSpecDto,
+    recurrence: Option<RecurrenceRuleDto>,
+}
+
+impl From<Schedule> for ScheduleDto {
+    fn from(value: Schedule) -> Self {
+        match value {
+            Schedule::OneTime(time) => Self {
+                kind: "one_time".to_string(),
+                time: TimeSpecDto::from(time),
+                recurrence: None,
+            },
+            Schedule::Recurring { time, recurrence } => Self {
+                kind: "recurring".to_string(),
+                time: TimeSpecDto::from(time),
+                recurrence: Some(RecurrenceRuleDto::from(recurrence)),
+            },
+        }
+    }
+}
+
+impl TryFrom<ScheduleDto> for Schedule {
+    type Error = ApplicationError;
+
+    fn try_from(value: ScheduleDto) -> Result<Self, Self::Error> {
+        if value.kind == "recurring" {
+            Ok(Self::Recurring {
+                time: value.time.into(),
+                recurrence: value.recurrence.unwrap_or_default().into(),
+            })
+        } else {
+            Ok(Self::OneTime(value.time.into()))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct TimeSpecDto {
+    #[serde(rename = "type")]
+    spec_type: String,
+    anchor: Option<String>,
+    #[serde(rename = "offsetMinutes")]
+    offset_minutes: i32,
+    #[serde(rename = "offsetHours")]
+    offset_hours: i32,
+    #[serde(rename = "offsetDays")]
+    offset_days: i32,
+    #[serde(rename = "offsetWeeks")]
+    offset_weeks: i32,
+    #[serde(rename = "offsetMonths")]
+    offset_months: i32,
+    #[serde(rename = "offsetYears")]
+    offset_years: i32,
+    #[serde(rename = "offsetDirection")]
+    offset_direction: Option<String>,
+    weekday: Option<String>,
+    date: Option<String>,
+    #[serde(rename = "dayOfMonth")]
+    day_of_month: i32,
+    #[serde(rename = "weekOfMonth")]
+    week_of_month: i32,
+    #[serde(rename = "dayPosition")]
+    day_position: Option<String>,
+    time: Option<String>,
+    #[serde(rename = "timeOfDay")]
+    time_of_day: Option<String>,
+}
+
+impl From<TimeSpec> for TimeSpecDto {
+    fn from(value: TimeSpec) -> Self {
+        Self {
+            spec_type: time_spec_type_to_str(value.spec_type).to_string(),
+            anchor: value.anchor,
+            offset_minutes: value.offset_minutes,
+            offset_hours: value.offset_hours,
+            offset_days: value.offset_days,
+            offset_weeks: value.offset_weeks,
+            offset_months: value.offset_months,
+            offset_years: value.offset_years,
+            offset_direction: value
+                .offset_direction
+                .map(offset_direction_to_str)
+                .map(str::to_string),
+            weekday: value.weekday.map(weekday_to_str).map(str::to_string),
+            date: value.date,
+            day_of_month: value.day_of_month,
+            week_of_month: value.week_of_month,
+            day_position: value
+                .day_position
+                .map(day_position_to_str)
+                .map(str::to_string),
+            time: value.time,
+            time_of_day: value
+                .time_of_day
+                .map(time_of_day_to_str)
+                .map(str::to_string),
+        }
+    }
+}
+
+impl From<TimeSpecDto> for TimeSpec {
+    fn from(value: TimeSpecDto) -> Self {
+        Self {
+            spec_type: time_spec_type_from_str(&value.spec_type),
+            anchor: value.anchor,
+            offset_minutes: value.offset_minutes,
+            offset_hours: value.offset_hours,
+            offset_days: value.offset_days,
+            offset_weeks: value.offset_weeks,
+            offset_months: value.offset_months,
+            offset_years: value.offset_years,
+            offset_direction: value
+                .offset_direction
+                .as_deref()
+                .map(offset_direction_from_str),
+            weekday: value.weekday.as_deref().map(weekday_from_str),
+            date: value.date,
+            day_of_month: value.day_of_month,
+            week_of_month: value.week_of_month,
+            day_position: value.day_position.as_deref().map(day_position_from_str),
+            time: value.time,
+            time_of_day: value.time_of_day.as_deref().map(time_of_day_from_str),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct RecurrenceRuleDto {
+    pattern: String,
+    interval: i32,
+    filters: Vec<String>,
+    #[serde(rename = "intervalUnit")]
+    interval_unit: Option<String>,
+    #[serde(rename = "weekOfMonth")]
+    week_of_month: i32,
+    #[serde(rename = "dayPosition")]
+    day_position: Option<String>,
+}
+
+impl From<RecurrenceRule> for RecurrenceRuleDto {
+    fn from(value: RecurrenceRule) -> Self {
+        Self {
+            pattern: recurrence_pattern_to_str(value.pattern).to_string(),
+            interval: value.interval,
+            filters: value
+                .filters
+                .into_iter()
+                .map(recurrence_filter_to_str)
+                .map(str::to_string)
+                .collect(),
+            interval_unit: value
+                .interval_unit
+                .map(interval_unit_to_str)
+                .map(str::to_string),
+            week_of_month: value.week_of_month,
+            day_position: value
+                .day_position
+                .map(day_position_to_str)
+                .map(str::to_string),
+        }
+    }
+}
+
+impl From<RecurrenceRuleDto> for RecurrenceRule {
+    fn from(value: RecurrenceRuleDto) -> Self {
+        Self {
+            pattern: recurrence_pattern_from_str(&value.pattern),
+            interval: value.interval,
+            filters: value
+                .filters
+                .iter()
+                .map(String::as_str)
+                .map(recurrence_filter_from_str)
+                .collect(),
+            interval_unit: value.interval_unit.as_deref().map(interval_unit_from_str),
+            week_of_month: value.week_of_month,
+            day_position: value.day_position.as_deref().map(day_position_from_str),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeliveryEventDto {
+    id: Option<i64>,
+    #[serde(rename = "reminderId")]
+    reminder_id: i32,
+    channel: String,
+    #[serde(rename = "plannedAt", with = "chrono_datetime_as_bson_datetime")]
+    planned_at: DateTime<Utc>,
+    #[serde(
+        rename = "sentAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    sent_at: Option<DateTime<Utc>>,
+    result: String,
+    #[serde(rename = "errorCode", default)]
+    error_code: Option<String>,
+}
+
+impl From<DeliveryEvent> for DeliveryEventDto {
+    fn from(value: DeliveryEvent) -> Self {
+        let (result, error_code) = delivery_result_to_parts(value.result);
+        Self {
+            id: value.id.map(DeliveryEventId::value),
+            reminder_id: value.reminder_id.value(),
+            channel: delivery_channel_to_str(value.channel).to_string(),
+            planned_at: value.planned_at,
+            sent_at: value.sent_at,
+            result: result.to_string(),
+            error_code,
+        }
+    }
+}
+
+impl TryFrom<DeliveryEventDto> for DeliveryEvent {
+    type Error = ApplicationError;
+
+    fn try_from(value: DeliveryEventDto) -> Result<Self, Self::Error> {
+        let mut event = DeliveryEvent::planned(
+            ReminderId::new(value.reminder_id),
+            delivery_channel_from_str(&value.channel),
+            value.planned_at,
+        );
+        if let Some(id) = value.id {
+            event.assign_id(DeliveryEventId::new(id));
+        }
+        event.sent_at = value.sent_at;
+        event.result = delivery_result_from_parts(&value.result, value.error_code);
+        Ok(event)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubscriptionDto {
+    id: Option<i64>,
+    #[serde(rename = "userId", default)]
+    user_id: Option<i64>,
+    #[serde(rename = "chatId")]
+    chat_id: i64,
+    plan: String,
+    source: String,
+    #[serde(rename = "isGroup")]
+    is_group: bool,
+    #[serde(rename = "groupName")]
+    group_name: String,
+    #[serde(rename = "ownerId", default)]
+    owner_id: Option<i64>,
+    #[serde(rename = "expiresAt", with = "chrono_datetime_as_bson_datetime")]
+    expires_at: DateTime<Utc>,
+    active: bool,
+    #[serde(rename = "freeState")]
+    free_state: String,
+}
+
+impl From<Subscription> for SubscriptionDto {
+    fn from(value: Subscription) -> Self {
+        Self {
+            id: value.id.map(SubscriptionId::value),
+            user_id: value.user_id.map(UserId::value),
+            chat_id: value.chat_id.value(),
+            plan: subscription_plan_to_str(value.plan).to_string(),
+            source: subscription_source_to_str(value.source).to_string(),
+            is_group: value.is_group,
+            group_name: value.group_name,
+            owner_id: value.owner_id.map(UserId::value),
+            expires_at: value.expires_at,
+            active: value.active,
+            free_state: free_state_to_str(value.free_state).to_string(),
+        }
+    }
+}
+
+impl TryFrom<SubscriptionDto> for Subscription {
+    type Error = ApplicationError;
+
+    fn try_from(value: SubscriptionDto) -> Result<Self, Self::Error> {
+        let mut subscription = Subscription::new_trial(
+            ChatId::new(value.chat_id),
+            value.expires_at,
+            SubscriptionPolicy { trial_days: 0 },
+        );
+        if let Some(id) = value.id {
+            subscription.assign_id(SubscriptionId::new(id));
+        }
+        if let Some(user_id) = value.user_id {
+            subscription.link_user(UserId::new(user_id));
+        }
+        subscription.plan = subscription_plan_from_str(&value.plan);
+        subscription.source = subscription_source_from_str(&value.source);
+        subscription.is_group = value.is_group;
+        subscription.group_name = value.group_name;
+        subscription.owner_id = value.owner_id.map(UserId::new);
+        subscription.expires_at = value.expires_at;
+        subscription.active = value.active;
+        subscription.free_state = free_state_from_str(&value.free_state);
+        Ok(subscription)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PaymentDto {
+    id: String,
+    #[serde(rename = "subscriptionId", default)]
+    subscription_id: Option<i64>,
+    provider: String,
+    #[serde(rename = "providerPaymentId", default)]
+    provider_payment_id: Option<String>,
+    amount: i64,
+    currency: String,
+    status: String,
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    created_at: DateTime<Utc>,
+}
+
+impl From<Payment> for PaymentDto {
+    fn from(value: Payment) -> Self {
+        Self {
+            id: value.id.into_string(),
+            subscription_id: value.subscription_id.map(SubscriptionId::value),
+            provider: value.provider.to_string(),
+            provider_payment_id: value.provider_payment_id,
+            amount: value.amount.amount,
+            currency: value.amount.currency.to_string(),
+            status: payment_status_to_str(&value.status).to_string(),
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl TryFrom<PaymentDto> for Payment {
+    type Error = ApplicationError;
+
+    fn try_from(value: PaymentDto) -> Result<Self, Self::Error> {
+        let mut payment = Payment::new(
+            PaymentId::new(value.id),
+            payment_provider_from_str(&value.provider),
+            Money::new(value.amount, currency_from_str(&value.currency))?,
+            value.created_at,
+        );
+        if let Some(subscription_id) = value.subscription_id {
+            payment.link_subscription(SubscriptionId::new(subscription_id));
+        }
+        if let Some(provider_payment_id) = value.provider_payment_id {
+            payment.set_provider_payment_id(provider_payment_id);
+        }
+        payment.update_status(payment_status_from_str(&value.status));
+        Ok(payment)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReferralDto {
+    #[serde(rename = "referrerId")]
+    referrer_id: i64,
+    #[serde(rename = "invitedId")]
+    invited_id: i64,
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    created_at: DateTime<Utc>,
+    #[serde(
+        rename = "rewardedAt",
+        default,
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    rewarded_at: Option<DateTime<Utc>>,
+}
+
+impl From<Referral> for ReferralDto {
+    fn from(value: Referral) -> Self {
+        Self {
+            referrer_id: value.referrer_id.value(),
+            invited_id: value.invited_id.value(),
+            created_at: value.created_at,
+            rewarded_at: value.rewarded_at,
+        }
+    }
+}
+
+impl TryFrom<ReferralDto> for Referral {
+    type Error = ApplicationError;
+
+    fn try_from(value: ReferralDto) -> Result<Self, Self::Error> {
+        let mut referral = Referral::new(
+            UserId::new(value.referrer_id),
+            UserId::new(value.invited_id),
+            value.created_at,
+        );
+        if let Some(rewarded_at) = value.rewarded_at {
+            referral.mark_rewarded(rewarded_at);
+        }
+        Ok(referral)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalChannelSubscriptionDto {
+    #[serde(rename = "userId")]
+    user_id: i64,
+    platform: String,
+    #[serde(rename = "channelId")]
+    channel_id: String,
+    #[serde(rename = "channelName")]
+    channel_name: String,
+    url: String,
+    #[serde(rename = "subNum")]
+    sub_num: i32,
+    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    created_at: DateTime<Utc>,
+    #[serde(rename = "lastContentId", default)]
+    last_content_id: Option<String>,
+    #[serde(rename = "isLive")]
+    is_live: bool,
+}
+
+impl From<ExternalChannelSubscription> for ExternalChannelSubscriptionDto {
+    fn from(value: ExternalChannelSubscription) -> Self {
+        Self {
+            user_id: value.user_id.value(),
+            platform: platform_to_str(value.platform).to_string(),
+            channel_id: value.channel_id,
+            channel_name: value.channel_name,
+            url: value.url,
+            sub_num: value.sub_num,
+            created_at: value.created_at,
+            last_content_id: value.last_content_id,
+            is_live: value.is_live,
+        }
+    }
+}
+
+impl TryFrom<ExternalChannelSubscriptionDto> for ExternalChannelSubscription {
+    type Error = ApplicationError;
+
+    fn try_from(value: ExternalChannelSubscriptionDto) -> Result<Self, Self::Error> {
+        let mut subscription = ExternalChannelSubscription::new(
+            UserId::new(value.user_id),
+            platform_from_str(&value.platform),
+            value.channel_id,
+            value.channel_name,
+            value.url,
+            value.sub_num,
+            value.created_at,
+        );
+        subscription.last_content_id = value.last_content_id;
+        subscription.is_live = value.is_live;
+        Ok(subscription)
+    }
+}
+
+fn repo_err(error: impl std::fmt::Display) -> ApplicationError {
+    ApplicationError::Repository(error.to_string())
+}
+
+fn repo_message(message: impl Into<String>) -> ApplicationError {
+    ApplicationError::Repository(message.into())
+}
+
+fn generated_i64_id() -> i64 {
+    Utc::now().timestamp_micros()
+}
+
+fn generated_i32_id() -> i32 {
+    (Utc::now().timestamp_micros() & i32::MAX as i64) as i32
+}
+
+fn user_status_to_str(value: UserStatus) -> &'static str {
+    match value {
+        UserStatus::Active => "active",
+        UserStatus::Blocked => "blocked",
+        UserStatus::Deleted => "deleted",
+    }
+}
+
+fn user_status_from_str(value: &str) -> UserStatus {
+    match value {
+        "blocked" => UserStatus::Blocked,
+        "deleted" => UserStatus::Deleted,
+        _ => UserStatus::Active,
+    }
+}
+
+fn communication_platform_from_str(value: &str) -> ApplicationResult<CommunicationPlatform> {
+    match value {
+        "vk" => Ok(CommunicationPlatform::Vk),
+        other => Err(repo_message(format!(
+            "unsupported communication platform: {other}"
+        ))),
+    }
+}
+
+fn language_to_str(value: Language) -> &'static str {
+    match value {
+        Language::Russian => "ru",
+    }
+}
+
+fn language_from_str(_value: &str) -> Language {
+    Language::Russian
+}
+
+fn task_status_to_str(value: TaskStatus) -> &'static str {
+    value.name()
+}
+
+fn task_status_from_str(value: &str) -> TaskStatus {
+    match value {
+        "completed" => TaskStatus::Completed,
+        "deleted" => TaskStatus::Deleted,
+        _ => TaskStatus::Active,
+    }
+}
+
+fn task_priority_to_str(value: TaskPriority) -> &'static str {
+    match value {
+        TaskPriority::Low => "low",
+        TaskPriority::Normal => "normal",
+        TaskPriority::High => "high",
+    }
+}
+
+fn task_priority_from_str(value: &str) -> TaskPriority {
+    match value {
+        "low" => TaskPriority::Low,
+        "high" => TaskPriority::High,
+        _ => TaskPriority::Normal,
+    }
+}
+
+fn reminder_status_to_str(value: &ReminderStatus) -> &'static str {
+    value.name()
+}
+
+fn reminder_status_from_parts(
+    status: &str,
+    retry_count: u32,
+    retry_at: Option<DateTime<Utc>>,
+) -> ReminderStatus {
+    match status {
+        "processing" => ReminderStatus::Processing,
+        "retry" => ReminderStatus::Retry {
+            attempt: retry_count,
+            retry_at: retry_at.unwrap_or_else(Utc::now),
+        },
+        "sent" => ReminderStatus::Sent,
+        "failed" => ReminderStatus::Failed,
+        _ => ReminderStatus::Active,
+    }
+}
+
+fn time_spec_type_to_str(value: TimeSpecType) -> &'static str {
+    match value {
+        TimeSpecType::Relative => "relative",
+        TimeSpecType::Weekday => "weekday",
+        TimeSpecType::Absolute => "absolute",
+        TimeSpecType::Monthly => "monthly",
+        TimeSpecType::Yearly => "yearly",
+        TimeSpecType::Daily => "daily",
+    }
+}
+
+fn time_spec_type_from_str(value: &str) -> TimeSpecType {
+    match value {
+        "weekday" => TimeSpecType::Weekday,
+        "absolute" => TimeSpecType::Absolute,
+        "monthly" => TimeSpecType::Monthly,
+        "yearly" => TimeSpecType::Yearly,
+        "daily" => TimeSpecType::Daily,
+        _ => TimeSpecType::Relative,
+    }
+}
+
+fn offset_direction_to_str(value: OffsetDirection) -> &'static str {
+    match value {
+        OffsetDirection::After => "after",
+        OffsetDirection::Before => "before",
+    }
+}
+
+fn offset_direction_from_str(value: &str) -> OffsetDirection {
+    match value {
+        "before" => OffsetDirection::Before,
+        _ => OffsetDirection::After,
+    }
+}
+
+fn weekday_to_str(value: Weekday) -> &'static str {
+    match value {
+        Weekday::Monday => "monday",
+        Weekday::Tuesday => "tuesday",
+        Weekday::Wednesday => "wednesday",
+        Weekday::Thursday => "thursday",
+        Weekday::Friday => "friday",
+        Weekday::Saturday => "saturday",
+        Weekday::Sunday => "sunday",
+    }
+}
+
+fn weekday_from_str(value: &str) -> Weekday {
+    match value {
+        "tuesday" => Weekday::Tuesday,
+        "wednesday" => Weekday::Wednesday,
+        "thursday" => Weekday::Thursday,
+        "friday" => Weekday::Friday,
+        "saturday" => Weekday::Saturday,
+        "sunday" => Weekday::Sunday,
+        _ => Weekday::Monday,
+    }
+}
+
+fn day_position_to_str(value: DayPosition) -> &'static str {
+    match value {
+        DayPosition::First => "first",
+        DayPosition::Second => "second",
+        DayPosition::Third => "third",
+        DayPosition::Fourth => "fourth",
+        DayPosition::Last => "last",
+    }
+}
+
+fn day_position_from_str(value: &str) -> DayPosition {
+    match value {
+        "second" => DayPosition::Second,
+        "third" => DayPosition::Third,
+        "fourth" => DayPosition::Fourth,
+        "last" => DayPosition::Last,
+        _ => DayPosition::First,
+    }
+}
+
+fn time_of_day_to_str(value: TimeOfDay) -> &'static str {
+    match value {
+        TimeOfDay::Morning => "morning",
+        TimeOfDay::Afternoon => "afternoon",
+        TimeOfDay::Evening => "evening",
+    }
+}
+
+fn time_of_day_from_str(value: &str) -> TimeOfDay {
+    match value {
+        "afternoon" => TimeOfDay::Afternoon,
+        "evening" => TimeOfDay::Evening,
+        _ => TimeOfDay::Morning,
+    }
+}
+
+fn recurrence_pattern_to_str(value: RecurrencePattern) -> &'static str {
+    match value {
+        RecurrencePattern::Daily => "daily",
+        RecurrencePattern::Weekly => "weekly",
+        RecurrencePattern::Monthly => "monthly",
+        RecurrencePattern::Yearly => "yearly",
+        RecurrencePattern::Custom => "custom",
+    }
+}
+
+fn recurrence_pattern_from_str(value: &str) -> RecurrencePattern {
+    match value {
+        "weekly" => RecurrencePattern::Weekly,
+        "monthly" => RecurrencePattern::Monthly,
+        "yearly" => RecurrencePattern::Yearly,
+        "custom" => RecurrencePattern::Custom,
+        _ => RecurrencePattern::Daily,
+    }
+}
+
+fn recurrence_filter_to_str(value: RecurrenceFilter) -> &'static str {
+    match value {
+        RecurrenceFilter::Weekdays => "weekdays",
+        RecurrenceFilter::Weekends => "weekends",
+    }
+}
+
+fn recurrence_filter_from_str(value: &str) -> RecurrenceFilter {
+    match value {
+        "weekends" => RecurrenceFilter::Weekends,
+        _ => RecurrenceFilter::Weekdays,
+    }
+}
+
+fn interval_unit_to_str(value: IntervalUnit) -> &'static str {
+    match value {
+        IntervalUnit::Days => "days",
+        IntervalUnit::Weeks => "weeks",
+        IntervalUnit::Months => "months",
+        IntervalUnit::Years => "years",
+    }
+}
+
+fn interval_unit_from_str(value: &str) -> IntervalUnit {
+    match value {
+        "weeks" => IntervalUnit::Weeks,
+        "months" => IntervalUnit::Months,
+        "years" => IntervalUnit::Years,
+        _ => IntervalUnit::Days,
+    }
+}
+
+fn delivery_channel_to_str(value: DeliveryChannel) -> &'static str {
+    match value {
+        DeliveryChannel::Vk => "vk",
+    }
+}
+
+fn delivery_channel_from_str(_value: &str) -> DeliveryChannel {
+    DeliveryChannel::Vk
+}
+
+fn delivery_result_to_parts(value: DeliveryResult) -> (&'static str, Option<String>) {
+    match value {
+        DeliveryResult::Planned => ("planned", None),
+        DeliveryResult::Sent => ("sent", None),
+        DeliveryResult::TemporaryFailure { error_code } => ("temporary_failure", error_code),
+        DeliveryResult::PermanentFailure { error_code } => ("permanent_failure", error_code),
+    }
+}
+
+fn delivery_result_from_parts(value: &str, error_code: Option<String>) -> DeliveryResult {
+    match value {
+        "sent" => DeliveryResult::Sent,
+        "temporary_failure" => DeliveryResult::TemporaryFailure { error_code },
+        "permanent_failure" => DeliveryResult::PermanentFailure { error_code },
+        _ => DeliveryResult::Planned,
+    }
+}
+
+fn subscription_plan_to_str(value: SubscriptionPlan) -> &'static str {
+    match value {
+        SubscriptionPlan::Basic => "basic",
+    }
+}
+
+fn subscription_plan_from_str(_value: &str) -> SubscriptionPlan {
+    SubscriptionPlan::Basic
+}
+
+fn subscription_source_to_str(value: SubscriptionSource) -> &'static str {
+    match value {
+        SubscriptionSource::Trial => "trial",
+        SubscriptionSource::Payment => "payment",
+        SubscriptionSource::ReferralReward => "referral_reward",
+        SubscriptionSource::AdminGrant => "admin_grant",
+    }
+}
+
+fn subscription_source_from_str(value: &str) -> SubscriptionSource {
+    match value {
+        "payment" => SubscriptionSource::Payment,
+        "referral_reward" => SubscriptionSource::ReferralReward,
+        "admin_grant" => SubscriptionSource::AdminGrant,
+        _ => SubscriptionSource::Trial,
+    }
+}
+
+fn free_state_to_str(value: FreeState) -> &'static str {
+    match value {
+        FreeState::None => "none",
+        FreeState::Trial => "trial",
+        FreeState::Paid => "paid",
+        FreeState::BonusWeek => "bonus_week",
+    }
+}
+
+fn free_state_from_str(value: &str) -> FreeState {
+    match value {
+        "trial" => FreeState::Trial,
+        "paid" => FreeState::Paid,
+        "bonus_week" => FreeState::BonusWeek,
+        _ => FreeState::None,
+    }
+}
+
+fn payment_provider_from_str(_value: &str) -> PaymentProvider {
+    PaymentProvider::YooKassa
+}
+
+fn payment_status_to_str(value: &PaymentStatus) -> &str {
+    match value {
+        PaymentStatus::Pending => "pending",
+        PaymentStatus::WaitingForCapture => "waiting_for_capture",
+        PaymentStatus::Succeeded => "succeeded",
+        PaymentStatus::Canceled => "canceled",
+        PaymentStatus::Failed => "failed",
+        PaymentStatus::Unknown(value) => value.as_str(),
+    }
+}
+
+fn payment_status_from_str(value: &str) -> PaymentStatus {
+    match value {
+        "pending" => PaymentStatus::Pending,
+        "waiting_for_capture" => PaymentStatus::WaitingForCapture,
+        "succeeded" => PaymentStatus::Succeeded,
+        "canceled" => PaymentStatus::Canceled,
+        "failed" => PaymentStatus::Failed,
+        other => PaymentStatus::Unknown(other.to_string()),
+    }
+}
+
+fn currency_from_str(_value: &str) -> Currency {
+    Currency::Rub
+}
+
+fn platform_to_str(value: Platform) -> &'static str {
+    match value {
+        Platform::Twitch => "twitch",
+        Platform::Youtube => "youtube",
+    }
+}
+
+fn platform_from_str(value: &str) -> Platform {
+    match value {
+        "youtube" => Platform::Youtube,
+        _ => Platform::Twitch,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_dto_roundtrips_without_legacy_field_names() {
+        let now = Utc::now();
+        let mut task = Task::new(UserId::new(7), "title", now);
+        task.assign_id(TaskId::new(1));
+        task.set_priority(TaskPriority::High, now);
+
+        let dto = TaskDto::from(task.clone());
+        let restored: Task = dto.try_into().unwrap();
+
+        assert_eq!(restored.id, task.id);
+        assert_eq!(restored.priority, TaskPriority::High);
+    }
+
+    #[test]
+    fn reminder_dto_keeps_task_separate_from_trigger() {
+        let now = Utc::now();
+        let mut reminder = Reminder::new(
+            ChatId::new(7),
+            "text",
+            Schedule::OneTime(TimeSpec::default()),
+            now,
+        );
+        reminder.assign_id(ReminderId::new(1));
+        reminder.attach_task(TaskId::new(2));
+
+        let dto = ReminderDto::from(reminder.clone());
+        let restored: Reminder = dto.try_into().unwrap();
+
+        assert_eq!(restored.id, reminder.id);
+        assert_eq!(restored.task_id, Some(TaskId::new(2)));
+        assert_eq!(restored.next_at, now);
+    }
+
+    #[test]
+    fn user_dto_identity_roundtrips_with_user_id() {
+        let now = Utc::now();
+        let user_id = UserId::new(42);
+        let mut user = User::registered(user_id, now);
+        user.add_identity(PlatformIdentity::new(
+            user_id,
+            CommunicationPlatform::Vk,
+            "vk-42",
+            Some(ChatId::new(7)),
+            now,
+        ));
+
+        let dto = UserDto::from(user.clone());
+        let restored: User = dto.try_into().unwrap();
+
+        assert_eq!(restored.id, user_id);
+        assert_eq!(restored.identities.len(), 1);
+        assert_eq!(restored.identities[0].user_id, user_id);
+        assert_eq!(restored.identities[0].external_id, "vk-42");
+    }
+}
