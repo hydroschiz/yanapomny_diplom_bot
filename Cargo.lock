@@ -206,6 +206,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bot"
+version = "0.2.0-rc.1"
+
+[[package]]
 name = "bson"
 version = "2.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2192,6 +2196,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scheduler"
+version = "0.2.0-rc.1"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3239,6 +3247,10 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "webhook"
+version = "0.2.0-rc.1"
 
 [[package]]
 name = "webpki-root-certs"

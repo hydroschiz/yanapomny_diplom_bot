@@ -1,0 +1,9 @@
+[package]
+name = "scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scheduler-service"
+path = "src/main.rs"

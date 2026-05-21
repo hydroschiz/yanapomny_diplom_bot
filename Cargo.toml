@@ -9,6 +9,9 @@ members = [
     "crates/transport-core",
     "crates/transport-vk",
     "crates/presentation",
+    "bins/bot",
+    "bins/scheduler",
+    "bins/webhook",
 ]
 
 [workspace.package]

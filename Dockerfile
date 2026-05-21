@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 # Copy source code
 COPY . .
 
-# Build all runtime entrypoints
-RUN cargo build --release --bins
+# Build transitional root runtime and cutover service packages
+RUN cargo build --release --bins --workspace
 
 # Final stage
 FROM debian:bookworm-slim
