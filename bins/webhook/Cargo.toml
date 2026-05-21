@@ -7,3 +7,15 @@ license.workspace = true
 [[bin]]
 name = "webhook-service"
 path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+application = { workspace = true }
+axum = "0.8"
+domain = { workspace = true }
+dotenvy = "0.15"
+infrastructure = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

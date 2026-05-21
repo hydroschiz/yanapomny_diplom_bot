@@ -7,3 +7,18 @@ license.workspace = true
 [[bin]]
 name = "bot-service"
 path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+application = { workspace = true }
+async-trait = { workspace = true }
+domain = { workspace = true }
+dotenvy = "0.15"
+infrastructure = { workspace = true }
+presentation = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+transport-core = { workspace = true }
+transport-vk = { workspace = true }
+vk-bot-api = "1.0"

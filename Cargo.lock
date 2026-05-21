@@ -208,6 +208,21 @@ dependencies = [
 [[package]]
 name = "bot"
 version = "0.2.0-rc.1"
+dependencies = [
+ "anyhow",
+ "application",
+ "async-trait",
+ "domain",
+ "dotenvy",
+ "infrastructure",
+ "presentation",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "transport-core",
+ "transport-vk",
+ "vk-bot-api",
+]
 
 [[package]]
 name = "bson"
@@ -2204,6 +2219,19 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.2.0-rc.1"
+dependencies = [
+ "anyhow",
+ "application",
+ "async-trait",
+ "domain",
+ "dotenvy",
+ "infrastructure",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "transport-core",
+ "transport-vk",
+]
 
 [[package]]
 name = "scopeguard"
@@ -3259,6 +3287,18 @@ dependencies = [
 [[package]]
 name = "webhook"
 version = "0.2.0-rc.1"
+dependencies = [
+ "anyhow",
+ "application",
+ "axum",
+ "domain",
+ "dotenvy",
+ "infrastructure",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "webpki-root-certs"
