@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    ".",
     "crates/shared",
     "crates/domain",
     "crates/application",
@@ -39,43 +38,3 @@ infrastructure = { path = "crates/infrastructure" }
 transport-core = { path = "crates/transport-core" }
 transport-vk = { path = "crates/transport-vk" }
 presentation = { path = "crates/presentation" }
-
-[package]
-name = "yanapomnyu_bot"
-version = "0.2.0-rc.1"
-edition = "2021"
-default-run = "yanapomnyu_bot"
-
-[dependencies]
-domain = { workspace = true }
-presentation = { workspace = true }
-transport-core = { workspace = true }
-transport-vk = { workspace = true }
-anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-dotenvy = "0.15"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-urlencoding = "2.1"
-async-trait = "0.1"
-dashmap = "6"
-mongodb = { version = "2.8", features = ["tokio-runtime", "bson-chrono-0_4"] }
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-regex = { workspace = true }
-once_cell = "1"
-
-# HTTP client for LLM API
-reqwest = { version = "0.12", features = ["json"] }
-futures = "0.3"
-
-# Payments
-axum = "0.8"
-yookassa = { git = "https://github.com/RIg410/yookassa-sdk-rs" }
-redis = { version = "0.26", features = ["tokio-comp"] }
-uuid = { version = "1", features = ["v4"] }
-
-# VK Bot API
-vk-bot-api = "1.0"

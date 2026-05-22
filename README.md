@@ -85,7 +85,7 @@ docker compose up -d mongodb redis llm_api
 4. **Запустите бота**
 
 ```bash
-cargo run
+cargo run -p bot
 ```
 
 ### Production развертывание
@@ -102,15 +102,19 @@ cargo run
 
 ```
 yanapomnyu_bot/
-├── src/
-│   ├── api/              # Внешние сервисы (MongoDB, LLM, YooKassa)
-│   ├── bot/              # VK бот (handlers, keyboards, states)
-│   ├── bin/              # Standalone entrypoints: scheduler, webhook
-│   ├── scheduler/        # Планировщик отправки напоминаний
-│   ├── config.rs         # Конфигурация из ENV
-│   ├── app.rs            # Инициализация приложения
-│   └── main.rs           # Точка входа
-├── Cargo.toml            # Зависимости Rust
+├── bins/
+│   ├── bot/              # VK long poll service composition root
+│   ├── scheduler/        # Reminder scheduler service
+│   └── webhook/          # YooKassa webhook service
+├── crates/
+│   ├── domain/           # Pure domain model
+│   ├── application/      # Use cases and ports
+│   ├── infrastructure/   # Mongo/Redis/YooKassa/LLM/Twitch adapters
+│   ├── presentation/     # Routing, rendering, keyboards
+│   ├── transport-core/   # Transport-neutral traits and DTOs
+│   └── transport-vk/     # VK SDK adapter
+├── src/                  # Legacy-only archive, not compiled by workspace
+├── Cargo.toml            # Virtual workspace
 ├── Dockerfile            # Сборка Docker образа
 ├── docker-compose.yml    # Локальная разработка
 ├── docker-compose.prod.yml  # Production конфигурация
@@ -139,8 +143,7 @@ yanapomnyu_bot/
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
 | `ADMINS` | ID администраторов (через запятую) | - |
-| `BOT_SCHEDULER_ENABLED` | Запускать scheduler внутри bot process | true |
-| `BOT_WEBHOOK_ENABLED` | Запускать YooKassa webhook внутри bot process | true |
+| `BOT_USERNAME` | Короткое имя бота для упоминаний в группах | yanapomnyu_bot |
 | `PAYMENTS_ENABLED` | Включить YooKassa-контур; для reminder-only ставьте `false` | auto by creds |
 | `YK_SHOP_ID` | YooKassa Shop ID | test |
 | `YK_SECRET_KEY` | YooKassa Secret Key | test |
@@ -181,10 +184,10 @@ yanapomnyu_bot/
 
 ```bash
 # Сборка проекта
-cargo build --release
+cargo build --release --workspace
 
 # Запуск тестов
-cargo test
+cargo test --workspace
 
 # Проверка кода
 cargo clippy --workspace --all-targets -- -D warnings
@@ -193,16 +196,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt
 
 # Запуск с логами
-RUST_LOG=debug cargo run
+RUST_LOG=debug cargo run -p bot
 
-# Standalone scheduler без VK long poll
-RUST_LOG=debug cargo run --bin scheduler
+# Scheduler без VK long poll
+RUST_LOG=debug cargo run -p scheduler
 
 # Standalone YooKassa webhook без VK long poll и scheduler
-RUST_LOG=debug cargo run --bin webhook
+RUST_LOG=debug cargo run -p webhook
 ```
 
-Для production можно оставить all-in-one режим или вынести scheduler/webhook в отдельные сервисы: запустите compose с профилем `standalone` и установите `BOT_SCHEDULER_ENABLED=false`, `BOT_WEBHOOK_ENABLED=false` для основного `bot` процесса.
+Root `cargo run` больше не является production-командой: root `Cargo.toml` является virtual workspace. Для production запускайте package services из `bins/*`.
 
 ### VK smoke-test
 

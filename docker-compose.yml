@@ -56,6 +56,6 @@ services:
       - MONGO_URI=${MONGO_URI:-mongodb://tgBotUser:tgBotPassword@mongodb1:27017/tgBot?authSource=tgBot}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/}
       - LLM_API_URL=http://llm_api:8080
-    command: bash -lc "source /usr/local/cargo/env && cargo +nightly build --release && ./target/release/yanapomnyu_bot"
+    command: bash -lc "source /usr/local/cargo/env && cargo +nightly build --release --workspace && ./target/release/bot-service"
     ports:
       - "3001:3001"
