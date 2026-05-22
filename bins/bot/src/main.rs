@@ -1,16 +1,22 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use anyhow::{Context, Result};
 use application::{
-    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, EnsureSubscriptionUseCase,
-    EnsureUserUseCase, GetProfileUseCase, SetUserTimezoneUseCase,
+    ApplicationResult, CreateReminderFromTextCommand, CreateReminderFromTextUseCase, DialogState,
+    DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
+    SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase, SetUserTimezoneUseCase,
 };
 use async_trait::async_trait;
-use domain::{ChatId, SubscriptionPolicy, TimePreferences, UserId};
+use domain::{ChatId, SnoozeDuration, SubscriptionPolicy, TimePreferences, UserId};
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
 };
 use presentation::{
-    CallbackRoute, ConversationState, IncomingCallback, IncomingMessage, MessageRoute,
-    Notification, Renderer, RouteContext, Router, TimezoneDisplay,
+    CallbackRoute, IncomingCallback, IncomingMessage, MessageRoute, Notification, Renderer,
+    RouteContext, Router, TimezoneDisplay,
 };
 use tracing::{error, info};
 use transport_core::BotTransport;
@@ -40,6 +46,7 @@ async fn main() -> Result<()> {
         store,
         llm,
         clock: SystemClock,
+        state_store: DialogStateMemory::default(),
         bot_username: config.bot_username.clone(),
         router: Router,
         renderer: Renderer,
@@ -107,9 +114,33 @@ struct BotHandler {
     store: MongoStore,
     llm: HttpLlmInterpreter,
     clock: SystemClock,
+    state_store: DialogStateMemory,
     bot_username: String,
     router: Router,
     renderer: Renderer,
+}
+
+#[derive(Clone, Default)]
+struct DialogStateMemory {
+    states: Arc<Mutex<HashMap<UserId, DialogState>>>,
+}
+
+#[async_trait]
+impl DialogStateStore for DialogStateMemory {
+    async fn get_state(&self, user_id: UserId) -> ApplicationResult<DialogState> {
+        Ok(self
+            .states
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .cloned()
+            .unwrap_or(DialogState::Idle))
+    }
+
+    async fn set_state(&self, user_id: UserId, state: DialogState) -> ApplicationResult<()> {
+        self.states.lock().unwrap().insert(user_id, state);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -136,9 +167,13 @@ impl BotHandler {
                     is_group: message.is_group,
                     group_title: message.group_title,
                 };
+                let state = self
+                    .state_store
+                    .get_state(UserId::new(incoming.user_id))
+                    .await?;
                 let route = self.router.route_message_with_context(
                     &incoming,
-                    ConversationState::Idle,
+                    state,
                     RouteContext::for_bot(&self.bot_username),
                 );
                 self.handle_message_route(&incoming, route).await
@@ -185,11 +220,67 @@ impl BotHandler {
                     .await
             }
             MessageRoute::ShowUtc => {
+                self.state_store
+                    .set_state(UserId::new(message.user_id), DialogState::AwaitingUtc)
+                    .await?;
                 self.send_notification(
                     message.peer_id,
                     Notification::UtcPrompt {
                         current: TimezoneDisplay::NotSet,
                     },
+                )
+                .await
+            }
+            MessageRoute::UtcInput(input) => {
+                self.update_timezone(message.peer_id, message.user_id, &input)
+                    .await
+            }
+            MessageRoute::SnoozeButtonsInput(input) => {
+                let buttons = parse_snooze_buttons(&input);
+                if buttons.is_empty() {
+                    return self
+                        .send_text(
+                            message.peer_id,
+                            "Не смог распознать время. Отправьте числа минутами, например: 15 60 180.",
+                        )
+                        .await;
+                }
+                SetSnoozeButtonsUseCase::new(&self.store)
+                    .execute(UserId::new(message.user_id), buttons.clone())
+                    .await?;
+                self.state_store
+                    .set_state(UserId::new(message.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(
+                    message.peer_id,
+                    &format!(
+                        "Кнопки откладывания обновлены: {}.",
+                        format_snooze_buttons(&buttons)
+                    ),
+                )
+                .await
+            }
+            MessageRoute::AutoSnoozeInput(input) => {
+                let Some(minutes) = parse_first_minutes(&input) else {
+                    return self
+                        .send_text(
+                            message.peer_id,
+                            "Не смог распознать время. Отправьте число минутами, например: 15.",
+                        )
+                        .await;
+                };
+                SetAutoSnoozeUseCase::new(&self.store)
+                    .execute(
+                        UserId::new(message.user_id),
+                        SnoozeDuration::from_minutes(minutes),
+                    )
+                    .await?;
+                self.state_store
+                    .set_state(UserId::new(message.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(
+                    message.peer_id,
+                    &format!("Автооткладывание обновлено: {} мин.", minutes),
                 )
                 .await
             }
@@ -255,10 +346,7 @@ impl BotHandler {
                     .await
             }
             MessageRoute::Ignored | MessageRoute::Empty => Ok(()),
-            MessageRoute::UtcInput(_)
-            | MessageRoute::SnoozeButtonsInput(_)
-            | MessageRoute::AutoSnoozeInput(_)
-            | MessageRoute::ReminderEditText(_)
+            MessageRoute::ReminderEditText(_)
             | MessageRoute::ReminderDeletionInput(_)
             | MessageRoute::ChannelDeletionInput(_) => {
                 self.send_text(
@@ -284,7 +372,40 @@ impl BotHandler {
                 self.send_notification(callback.peer_id, Notification::SetupMenu)
                     .await
             }
+            CallbackRoute::StartSnoozeSetup => {
+                self.state_store
+                    .set_state(
+                        UserId::new(callback.user_id),
+                        DialogState::AwaitingSnoozeButtons,
+                    )
+                    .await?;
+                self.send_notification(
+                    callback.peer_id,
+                    Notification::SnoozePrompt {
+                        current: "60, 180, 1440 мин".to_string(),
+                    },
+                )
+                .await
+            }
+            CallbackRoute::StartAutoSnoozeSetup => {
+                self.state_store
+                    .set_state(
+                        UserId::new(callback.user_id),
+                        DialogState::AwaitingAutoSnooze,
+                    )
+                    .await?;
+                self.send_notification(
+                    callback.peer_id,
+                    Notification::AutoSnoozePrompt {
+                        current: "15 мин".to_string(),
+                    },
+                )
+                .await
+            }
             CallbackRoute::StartUtcSetup => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::AwaitingUtc)
+                    .await?;
                 self.send_notification(
                     callback.peer_id,
                     Notification::UtcPrompt {
@@ -298,12 +419,7 @@ impl BotHandler {
                     .await
             }
             CallbackRoute::SetUtc(offset) => {
-                let preferences =
-                    TimePreferences::from_fixed_offset_strings("08:00", "14:00", "19:00", &offset)?;
-                SetUserTimezoneUseCase::new(&self.store)
-                    .execute(UserId::new(callback.user_id), preferences)
-                    .await?;
-                self.send_notification(callback.peer_id, Notification::UtcSuccess { offset })
+                self.update_timezone(callback.peer_id, callback.user_id, &offset)
                     .await
             }
             CallbackRoute::ShowPayMenu => {
@@ -326,7 +442,17 @@ impl BotHandler {
                 .await
             }
             CallbackRoute::CancelUtc => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
                 self.send_notification(callback.peer_id, Notification::UtcCancelled)
+                    .await
+            }
+            CallbackRoute::BackMain => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
+                self.send_notification(callback.peer_id, Notification::Start)
                     .await
             }
             _ => {
@@ -337,6 +463,25 @@ impl BotHandler {
                 .await
             }
         }
+    }
+
+    async fn update_timezone(&self, peer_id: i64, user_id: i64, offset: &str) -> Result<()> {
+        let preferences =
+            TimePreferences::from_fixed_offset_strings("08:00", "14:00", "19:00", offset)?;
+        let display_offset = preferences.utc_offset.to_string();
+        SetUserTimezoneUseCase::new(&self.store)
+            .execute(UserId::new(user_id), preferences)
+            .await?;
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::Idle)
+            .await?;
+        self.send_notification(
+            peer_id,
+            Notification::UtcSuccess {
+                offset: display_offset,
+            },
+        )
+        .await
     }
 
     async fn create_task_and_reminder(&self, peer_id: i64, user_id: i64, text: &str) -> Result<()> {
@@ -402,4 +547,34 @@ fn optional_env(name: &str) -> Option<String> {
 
 fn env_or(name: &str, default: &str) -> String {
     optional_env(name).unwrap_or_else(|| default.to_string())
+}
+
+fn parse_snooze_buttons(input: &str) -> Vec<SnoozeDuration> {
+    let mut buttons = Vec::new();
+    for minutes in input
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .filter(|minutes| *minutes > 0)
+    {
+        let duration = SnoozeDuration::from_minutes(minutes);
+        if !buttons.contains(&duration) {
+            buttons.push(duration);
+        }
+    }
+    buttons
+}
+
+fn parse_first_minutes(input: &str) -> Option<u32> {
+    input
+        .split(|ch: char| !ch.is_ascii_digit())
+        .find_map(|part| part.parse::<u32>().ok())
+        .filter(|minutes| *minutes > 0)
+}
+
+fn format_snooze_buttons(buttons: &[SnoozeDuration]) -> String {
+    buttons
+        .iter()
+        .map(|button| format!("{} мин", button.minutes()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
