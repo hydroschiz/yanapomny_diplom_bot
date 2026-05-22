@@ -2,15 +2,17 @@ use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
 use application::{
-    active_tasks, ApplicationError, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
-    DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
-    ListTasksUseCase, SaveExternalChannelSubscriptionCommand,
+    active_tasks, ApplicationError, CancelReminderUseCase, CompleteReminderUseCase,
+    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, DialogState, DialogStateStore,
+    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ListActiveRemindersUseCase,
+    ListTasksUseCase, ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase,
 };
 use async_trait::async_trait;
 use domain::{
-    ChatId, Platform, ReminderId, SnoozeDuration, SubscriptionPolicy, Task, TimePreferences, UserId,
+    ChatId, Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy,
+    Task, TimePreferences, UserId,
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
@@ -300,9 +302,11 @@ impl BotHandler {
                     .await
             }
             MessageRoute::Ignored | MessageRoute::Empty => Ok(()),
-            MessageRoute::ReminderEditText(_)
-            | MessageRoute::ReminderDeletionInput(_)
-            | MessageRoute::ChannelDeletionInput(_) => {
+            MessageRoute::ReminderDeletionInput(input) => {
+                self.delete_reminder_from_input(message.peer_id, message.user_id, &input)
+                    .await
+            }
+            MessageRoute::ReminderEditText(_) | MessageRoute::ChannelDeletionInput(_) => {
                 self.send_text(
                     message.peer_id,
                     "Этот ввод пока не ожидается новым service binary.",
@@ -402,6 +406,19 @@ impl BotHandler {
             CallbackRoute::SnoozeReminder { reminder_id, code } => {
                 self.snooze_reminder(callback.peer_id, reminder_id, &code)
                     .await
+            }
+            CallbackRoute::CompleteReminder(reminder_id) => {
+                self.complete_reminder(callback.peer_id, reminder_id).await
+            }
+            CallbackRoute::StartReminderDeletion => {
+                self.start_reminder_deletion(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::BackFromReminderDeletion | CallbackRoute::CancelReminder => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(callback.peer_id, "Действие отменено.").await
             }
             CallbackRoute::CancelUtc => {
                 self.state_store
@@ -542,6 +559,110 @@ impl BotHandler {
         .await
     }
 
+    async fn complete_reminder(&self, peer_id: i64, reminder_id: i32) -> Result<()> {
+        let reminder =
+            match CompleteReminderUseCase::new(&self.store, &self.store, &self.store, &self.clock)
+                .execute(ReminderActionCommand {
+                    reminder_id: ReminderId::new(reminder_id),
+                    chat_id: ChatId::new(peer_id),
+                })
+                .await
+            {
+                Ok(reminder) => reminder,
+                Err(ApplicationError::NotFound { .. }) => {
+                    return self.send_text(peer_id, "Напоминание не найдено.").await;
+                }
+                Err(ApplicationError::Conflict(_)) => {
+                    return self.send_text(peer_id, "Напоминание уже закрыто.").await;
+                }
+                Err(error) => return Err(error.into()),
+            };
+
+        let text = if reminder.status == ReminderStatus::Sent {
+            "Напоминание выполнено.".to_string()
+        } else {
+            format!(
+                "Напоминание отмечено. Следующее сработает: {}",
+                reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+            )
+        };
+        self.send_text(peer_id, &text).await
+    }
+
+    async fn start_reminder_deletion(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let reminders = self.active_reminders_for_chat(peer_id).await?;
+        if reminders.is_empty() {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self
+                .send_text(peer_id, "Активных напоминаний для удаления нет.")
+                .await;
+        }
+
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::AwaitingReminderDeletion)
+            .await?;
+        self.send_text(
+            peer_id,
+            &format!(
+                "Введите номер напоминания для удаления:\n{}",
+                format_active_reminders(&reminders)
+            ),
+        )
+        .await
+    }
+
+    async fn delete_reminder_from_input(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        input: &str,
+    ) -> Result<()> {
+        let Ok(number) = input.trim().parse::<usize>() else {
+            return self
+                .send_text(peer_id, "Введите номер напоминания из списка.")
+                .await;
+        };
+        if number == 0 {
+            return self
+                .send_text(peer_id, "Введите номер напоминания из списка.")
+                .await;
+        }
+
+        let reminders = self.active_reminders_for_chat(peer_id).await?;
+        let Some(reminder) = reminders.get(number - 1) else {
+            return self
+                .send_text(peer_id, "Напоминания с таким номером нет.")
+                .await;
+        };
+        let Some(reminder_id) = reminder.id else {
+            return self
+                .send_text(peer_id, "Не смог определить ID напоминания.")
+                .await;
+        };
+
+        let cancelled = CancelReminderUseCase::new(&self.store, &self.store, &self.clock)
+            .execute(ReminderActionCommand {
+                reminder_id,
+                chat_id: ChatId::new(peer_id),
+            })
+            .await?;
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::Idle)
+            .await?;
+        self.send_text(peer_id, &format!("Напоминание удалено: {}", cancelled.text))
+            .await
+    }
+
+    async fn active_reminders_for_chat(&self, peer_id: i64) -> Result<Vec<Reminder>> {
+        let mut reminders = ListActiveRemindersUseCase::new(&self.store)
+            .execute(ChatId::new(peer_id))
+            .await?;
+        reminders.sort_by(compare_reminders_for_list);
+        Ok(reminders)
+    }
+
     async fn send_notification(&self, peer_id: i64, notification: Notification) -> Result<()> {
         let content = self
             .renderer
@@ -624,6 +745,12 @@ fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {
     compare_optional_due(left, right).then_with(|| left.created_at.cmp(&right.created_at))
 }
 
+fn compare_reminders_for_list(left: &Reminder, right: &Reminder) -> Ordering {
+    left.next_at
+        .cmp(&right.next_at)
+        .then_with(|| left.text.cmp(&right.text))
+}
+
 fn compare_optional_due(left: &Task, right: &Task) -> Ordering {
     match (left.due_at.as_ref(), right.due_at.as_ref()) {
         (Some(left), Some(right)) => left.cmp(right),
@@ -641,6 +768,19 @@ fn format_active_tasks(tasks: &[Task]) -> String {
             .map(|due_at| due_at.format("%d.%m.%Y %H:%M UTC").to_string())
             .unwrap_or_else(|| "без срока".to_string());
         text.push_str(&format!("{}. {} - {}\n", index + 1, task.title, due_at));
+    }
+    text
+}
+
+fn format_active_reminders(reminders: &[Reminder]) -> String {
+    let mut text = String::new();
+    for (index, reminder) in reminders.iter().enumerate() {
+        text.push_str(&format!(
+            "{}. {} - {}\n",
+            index + 1,
+            reminder.text,
+            reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+        ));
     }
     text
 }

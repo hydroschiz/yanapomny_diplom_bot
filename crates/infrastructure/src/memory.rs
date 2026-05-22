@@ -148,6 +148,18 @@ impl ReminderRepository for InMemoryStore {
             .insert(id, reminder.clone());
         Ok(())
     }
+
+    async fn list_reminders(&self, chat_id: ChatId) -> ApplicationResult<Vec<Reminder>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .reminders
+            .values()
+            .filter(|reminder| reminder.chat_id == chat_id)
+            .cloned()
+            .collect())
+    }
 }
 
 #[async_trait]

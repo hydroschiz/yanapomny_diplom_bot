@@ -44,6 +44,9 @@ pub trait ReminderRepository: Send + Sync {
 
     async fn find_reminder(&self, id: ReminderId) -> ApplicationResult<Option<Reminder>>;
     async fn save_reminder(&self, reminder: &Reminder) -> ApplicationResult<()>;
+    async fn list_reminders(&self, _chat_id: ChatId) -> ApplicationResult<Vec<Reminder>> {
+        Ok(Vec::new())
+    }
 
     async fn claim_due_reminders(
         &self,
@@ -177,6 +180,7 @@ pub enum DialogState {
     AwaitingUtc,
     AwaitingSnoozeButtons,
     AwaitingAutoSnooze,
+    AwaitingReminderDeletion,
 }
 
 #[async_trait]

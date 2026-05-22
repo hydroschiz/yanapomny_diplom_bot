@@ -460,6 +460,17 @@ impl ReminderRepository for MongoStore {
         dto.map(TryInto::try_into).transpose()
     }
 
+    async fn list_reminders(&self, chat_id: ChatId) -> ApplicationResult<Vec<Reminder>> {
+        self.reminders()
+            .find(doc! { "chat_id": chat_id.value() }, None)
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+
     async fn save_reminder(&self, reminder: &Reminder) -> ApplicationResult<()> {
         let id = reminder
             .id
@@ -1799,6 +1810,7 @@ fn reminder_status_from_parts(
         },
         "sent" => ReminderStatus::Sent,
         "failed" => ReminderStatus::Failed,
+        "cancelled" => ReminderStatus::Cancelled,
         _ => ReminderStatus::Active,
     }
 }
@@ -2075,6 +2087,7 @@ fn dialog_state_to_str(value: &DialogState) -> &'static str {
         DialogState::AwaitingUtc => "awaiting_utc",
         DialogState::AwaitingSnoozeButtons => "awaiting_snooze_buttons",
         DialogState::AwaitingAutoSnooze => "awaiting_auto_snooze",
+        DialogState::AwaitingReminderDeletion => "awaiting_reminder_deletion",
     }
 }
 
@@ -2083,6 +2096,7 @@ fn dialog_state_from_str(value: &str) -> DialogState {
         "awaiting_utc" => DialogState::AwaitingUtc,
         "awaiting_snooze_buttons" => DialogState::AwaitingSnoozeButtons,
         "awaiting_auto_snooze" => DialogState::AwaitingAutoSnooze,
+        "awaiting_reminder_deletion" => DialogState::AwaitingReminderDeletion,
         _ => DialogState::Idle,
     }
 }

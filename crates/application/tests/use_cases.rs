@@ -1,16 +1,17 @@
 use std::{collections::HashMap, sync::Mutex};
 
 use application::{
-    active_tasks, CheckTwitchStreamsUseCase, Clock, CompleteTaskUseCase,
-    ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
+    active_tasks, CancelReminderUseCase, CheckTwitchStreamsUseCase, Clock, CompleteReminderUseCase,
+    CompleteTaskUseCase, ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
     CreateReferralUseCase, CreateReminderCommand, CreateReminderFromTextCommand,
     CreateReminderFromTextUseCase, CreateReminderUseCase, CreateTaskFromTextUseCase,
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
-    ExternalChannelSubscriptionRepository, InterpretedTask, NaturalLanguageInterpreter,
-    Notification, Notifier, PaymentGateway, PaymentRepository, ReferralRepository,
-    ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
-    SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
-    TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
+    ExternalChannelSubscriptionRepository, InterpretedTask, ListActiveRemindersUseCase,
+    NaturalLanguageInterpreter, Notification, Notifier, PaymentGateway, PaymentRepository,
+    ReferralRepository, ReminderActionCommand, ReminderPreferencesRepository, ReminderRepository,
+    SaveExternalChannelSubscriptionCommand, SaveExternalChannelSubscriptionUseCase,
+    SnoozeReminderUseCase, StreamPlatformGateway, TaskRepository, UpdatePreferencesUseCase,
+    UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -147,6 +148,88 @@ async fn reminder_snooze_and_delivery_use_cases_work() {
     assert_eq!(store.notifications().len(), 1);
     assert_eq!(store.events_for(due.id.unwrap()).len(), 1);
     assert_eq!(store.reminder(due.id.unwrap()).status, ReminderStatus::Sent);
+}
+
+#[tokio::test]
+async fn reminder_completion_listing_and_cancellation_use_cases_work() {
+    let store = AppMemory::new(fixed_now());
+    let chat_id = ChatId::new(7);
+    let user_id = UserId::new(7);
+    let complete_task = store
+        .create_task(Task::new(user_id, "complete", fixed_now()))
+        .await
+        .unwrap();
+    let cancel_task = store
+        .create_task(Task::new(user_id, "cancel", fixed_now()))
+        .await
+        .unwrap();
+    let complete_reminder = CreateReminderUseCase::new(&store)
+        .execute(CreateReminderCommand {
+            task_id: complete_task.id,
+            chat_id,
+            text: "complete".to_string(),
+            schedule: Schedule::OneTime(TimeSpec::default()),
+            next_at: fixed_now() - Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    let cancel_reminder = CreateReminderUseCase::new(&store)
+        .execute(CreateReminderCommand {
+            task_id: cancel_task.id,
+            chat_id,
+            text: "cancel".to_string(),
+            schedule: Schedule::OneTime(TimeSpec::default()),
+            next_at: fixed_now() + Duration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    let active = ListActiveRemindersUseCase::new(&store)
+        .execute(chat_id)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 2);
+
+    let completed = CompleteReminderUseCase::new(&store, &store, &store, &store)
+        .execute(ReminderActionCommand {
+            reminder_id: complete_reminder.id.unwrap(),
+            chat_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.status, ReminderStatus::Sent);
+    assert_eq!(
+        store
+            .find_task(complete_task.id.unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Completed
+    );
+
+    let cancelled = CancelReminderUseCase::new(&store, &store, &store)
+        .execute(ReminderActionCommand {
+            reminder_id: cancel_reminder.id.unwrap(),
+            chat_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, ReminderStatus::Cancelled);
+    assert_eq!(
+        store
+            .find_task(cancel_task.id.unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Deleted
+    );
+    assert!(ListActiveRemindersUseCase::new(&store)
+        .execute(chat_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -463,6 +546,21 @@ impl ReminderRepository for AppMemory {
             .reminders
             .insert(reminder.id.unwrap(), reminder.clone());
         Ok(())
+    }
+
+    async fn list_reminders(
+        &self,
+        chat_id: ChatId,
+    ) -> application::ApplicationResult<Vec<Reminder>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .reminders
+            .values()
+            .filter(|reminder| reminder.chat_id == chat_id)
+            .cloned()
+            .collect())
     }
 
     async fn claim_due_reminders(

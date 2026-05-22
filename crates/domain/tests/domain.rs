@@ -120,6 +120,10 @@ fn reminder_claim_retry_and_snooze_transitions() {
     assert_eq!(snoozed_until, now + Duration::minutes(15));
     assert_eq!(reminder.status, ReminderStatus::Active);
     assert_eq!(reminder.retry_count, 0);
+
+    reminder.cancel().unwrap();
+    assert_eq!(reminder.status, ReminderStatus::Cancelled);
+    assert!(reminder.status.is_terminal());
 }
 
 #[test]

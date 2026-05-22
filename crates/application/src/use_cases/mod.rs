@@ -15,9 +15,10 @@ pub use payment::{
 };
 pub use referral::{ConsumeReferralRewardUseCase, CreateReferralUseCase};
 pub use reminder::{
-    CreateReminderCommand, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
-    CreateReminderUseCase, CreatedReminderFromText, DeliverDueRemindersUseCase, DeliveryReport,
-    SnoozeReminderUseCase,
+    active_reminders, CancelReminderUseCase, CompleteReminderUseCase, CreateReminderCommand,
+    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, CreateReminderUseCase,
+    CreatedReminderFromText, DeliverDueRemindersUseCase, DeliveryReport,
+    ListActiveRemindersUseCase, ReminderActionCommand, SnoozeReminderUseCase,
 };
 pub use subscription::EnsureSubscriptionUseCase;
 pub use task::{

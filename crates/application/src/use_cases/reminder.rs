@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use domain::{
     ChatId, DeliveryChannel, DeliveryEvent, Reminder, ReminderId, RetryPolicy, Schedule, Task,
-    TaskId, TaskPriority, User, UserId,
+    TaskId, TaskPriority, TaskStatus, User, UserId,
 };
 
 use crate::{
@@ -161,6 +161,184 @@ where
         reminder.snooze(self.clock.now(), minutes)?;
         self.reminders.save_reminder(&reminder).await?;
         Ok(reminder)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReminderActionCommand {
+    pub reminder_id: ReminderId,
+    pub chat_id: ChatId,
+}
+
+pub struct ListActiveRemindersUseCase<'a, R> {
+    reminders: &'a R,
+}
+
+impl<'a, R> ListActiveRemindersUseCase<'a, R>
+where
+    R: ReminderRepository,
+{
+    pub const fn new(reminders: &'a R) -> Self {
+        Self { reminders }
+    }
+
+    pub async fn execute(&self, chat_id: ChatId) -> ApplicationResult<Vec<Reminder>> {
+        Ok(active_reminders(
+            self.reminders.list_reminders(chat_id).await?,
+        ))
+    }
+}
+
+pub struct CompleteReminderUseCase<'a, R, P, T, C> {
+    reminders: &'a R,
+    preferences: &'a P,
+    tasks: &'a T,
+    clock: &'a C,
+}
+
+impl<'a, R, P, T, C> CompleteReminderUseCase<'a, R, P, T, C>
+where
+    R: ReminderRepository,
+    P: ReminderPreferencesRepository,
+    T: TaskRepository,
+    C: Clock,
+{
+    pub const fn new(reminders: &'a R, preferences: &'a P, tasks: &'a T, clock: &'a C) -> Self {
+        Self {
+            reminders,
+            preferences,
+            tasks,
+            clock,
+        }
+    }
+
+    pub async fn execute(&self, command: ReminderActionCommand) -> ApplicationResult<Reminder> {
+        let mut reminder = self.load_reminder(command).await?;
+        let preferences = self
+            .preferences
+            .find_time_preferences_for_chat(reminder.chat_id)
+            .await?;
+        let is_complete = reminder
+            .next_after_send(self.clock.now(), &preferences)?
+            .is_none();
+        self.reminders.save_reminder(&reminder).await?;
+
+        if is_complete {
+            self.complete_linked_task(&reminder).await?;
+        }
+
+        Ok(reminder)
+    }
+
+    async fn load_reminder(&self, command: ReminderActionCommand) -> ApplicationResult<Reminder> {
+        let reminder = self
+            .reminders
+            .find_reminder(command.reminder_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound {
+                entity: "reminder",
+                id: command.reminder_id.to_string(),
+            })?;
+        ensure_reminder_chat(&reminder, command.chat_id)?;
+        ensure_reminder_is_open(&reminder)?;
+        Ok(reminder)
+    }
+
+    async fn complete_linked_task(&self, reminder: &Reminder) -> ApplicationResult<()> {
+        let Some(task_id) = reminder.task_id else {
+            return Ok(());
+        };
+        let Some(mut task) = self.tasks.find_task(task_id).await? else {
+            return Ok(());
+        };
+        if task.status == TaskStatus::Active {
+            task.complete(self.clock.now())?;
+            self.tasks.save_task(&task).await?;
+        }
+        Ok(())
+    }
+}
+
+pub struct CancelReminderUseCase<'a, R, T, C> {
+    reminders: &'a R,
+    tasks: &'a T,
+    clock: &'a C,
+}
+
+impl<'a, R, T, C> CancelReminderUseCase<'a, R, T, C>
+where
+    R: ReminderRepository,
+    T: TaskRepository,
+    C: Clock,
+{
+    pub const fn new(reminders: &'a R, tasks: &'a T, clock: &'a C) -> Self {
+        Self {
+            reminders,
+            tasks,
+            clock,
+        }
+    }
+
+    pub async fn execute(&self, command: ReminderActionCommand) -> ApplicationResult<Reminder> {
+        let mut reminder = self
+            .reminders
+            .find_reminder(command.reminder_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound {
+                entity: "reminder",
+                id: command.reminder_id.to_string(),
+            })?;
+        ensure_reminder_chat(&reminder, command.chat_id)?;
+        reminder.cancel()?;
+        self.reminders.save_reminder(&reminder).await?;
+        self.delete_linked_task(&reminder).await?;
+        Ok(reminder)
+    }
+
+    async fn delete_linked_task(&self, reminder: &Reminder) -> ApplicationResult<()> {
+        let Some(task_id) = reminder.task_id else {
+            return Ok(());
+        };
+        let Some(mut task) = self.tasks.find_task(task_id).await? else {
+            return Ok(());
+        };
+        if task.status != TaskStatus::Deleted {
+            task.delete(self.clock.now())?;
+            self.tasks.save_task(&task).await?;
+        }
+        Ok(())
+    }
+}
+
+pub fn active_reminders(reminders: Vec<Reminder>) -> Vec<Reminder> {
+    reminders
+        .into_iter()
+        .filter(|reminder| !reminder.status.is_terminal())
+        .collect()
+}
+
+fn ensure_reminder_chat(reminder: &Reminder, chat_id: ChatId) -> ApplicationResult<()> {
+    if reminder.chat_id == chat_id {
+        Ok(())
+    } else {
+        Err(ApplicationError::NotFound {
+            entity: "reminder",
+            id: reminder
+                .id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+    }
+}
+
+fn ensure_reminder_is_open(reminder: &Reminder) -> ApplicationResult<()> {
+    if reminder.status.is_terminal() {
+        Err(ApplicationError::Conflict(format!(
+            "reminder is already {}",
+            reminder.status.name()
+        )))
+    } else {
+        Ok(())
     }
 }
 

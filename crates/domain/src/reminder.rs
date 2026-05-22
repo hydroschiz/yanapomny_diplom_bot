@@ -12,6 +12,7 @@ pub enum ReminderStatus {
     },
     Sent,
     Failed,
+    Cancelled,
 }
 
 impl ReminderStatus {
@@ -22,11 +23,12 @@ impl ReminderStatus {
             Self::Retry { .. } => "retry",
             Self::Sent => "sent",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Sent | Self::Failed)
+        matches!(self, Self::Sent | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -172,6 +174,16 @@ impl Reminder {
         }
 
         self.status = ReminderStatus::Failed;
+        self.retry_at = None;
+        Ok(())
+    }
+
+    pub fn cancel(&mut self) -> Result<(), DomainError> {
+        if self.status.is_terminal() {
+            return Err(invalid_transition(&self.status, "cancelled"));
+        }
+
+        self.status = ReminderStatus::Cancelled;
         self.retry_at = None;
         Ok(())
     }
