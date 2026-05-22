@@ -1,22 +1,28 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
 use application::{
-    ApplicationResult, CreateReminderFromTextCommand, CreateReminderFromTextUseCase, DialogState,
-    DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
-    SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase, SetUserTimezoneUseCase,
+    active_tasks, ApplicationError, ApplicationResult, CreateReminderFromTextCommand,
+    CreateReminderFromTextUseCase, DialogState, DialogStateStore, EnsureSubscriptionUseCase,
+    EnsureUserUseCase, GetProfileUseCase, ListTasksUseCase, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
+    SetUserTimezoneUseCase, SnoozeReminderUseCase,
 };
 use async_trait::async_trait;
-use domain::{ChatId, SnoozeDuration, SubscriptionPolicy, TimePreferences, UserId};
+use domain::{
+    ChatId, Platform, ReminderId, SnoozeDuration, SubscriptionPolicy, Task, TimePreferences, UserId,
+};
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
 };
+use presentation::keyboard::{snooze_code_to_label, snooze_code_to_minutes};
 use presentation::{
-    CallbackRoute, IncomingCallback, IncomingMessage, MessageRoute, Notification, Renderer,
-    RouteContext, Router, TimezoneDisplay,
+    CallbackRoute, ChannelPlatform, IncomingCallback, IncomingMessage, MessageRoute, Notification,
+    ParsedChannelLink, Renderer, RouteContext, Router, TimezoneDisplay,
 };
 use tracing::{error, info};
 use transport_core::BotTransport;
@@ -317,11 +323,8 @@ impl BotHandler {
                     .await
             }
             MessageRoute::ListReminders => {
-                self.send_text(
-                    message.peer_id,
-                    "Список задач будет доступен в следующем шаге cutover.",
-                )
-                .await
+                self.show_active_tasks(message.peer_id, message.user_id)
+                    .await
             }
             MessageRoute::ShowSubscriptions => {
                 self.send_text(
@@ -335,11 +338,8 @@ impl BotHandler {
                     .await
             }
             MessageRoute::ChannelSubscriptionUrl(channel) => {
-                let text = format!(
-                    "Канал распознан: {} ({:?}). Сохранение подписки будет включено в следующем шаге cutover.",
-                    channel.channel_name, channel.platform
-                );
-                self.send_text(message.peer_id, &text).await
+                self.save_external_channel_subscription(message.peer_id, message.user_id, channel)
+                    .await
             }
             MessageRoute::UnknownCommand(_) => {
                 self.send_text(message.peer_id, "Неизвестная команда. Используйте /help")
@@ -441,6 +441,14 @@ impl BotHandler {
                 )
                 .await
             }
+            CallbackRoute::ListReminders => {
+                self.show_active_tasks(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::SnoozeReminder { reminder_id, code } => {
+                self.snooze_reminder(callback.peer_id, reminder_id, &code)
+                    .await
+            }
             CallbackRoute::CancelUtc => {
                 self.state_store
                     .set_state(UserId::new(callback.user_id), DialogState::Idle)
@@ -506,6 +514,78 @@ impl BotHandler {
             reminder.next_at.format("%d.%m.%Y %H:%M UTC")
         );
         self.send_text(peer_id, &text).await
+    }
+
+    async fn show_active_tasks(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let mut tasks = active_tasks(
+            ListTasksUseCase::new(&self.store)
+                .execute(UserId::new(user_id))
+                .await?,
+        );
+        tasks.sort_by(compare_tasks_for_list);
+
+        if tasks.is_empty() {
+            return self.send_text(peer_id, "Активных задач пока нет.").await;
+        }
+
+        self.send_text(peer_id, &format_active_tasks(&tasks)).await
+    }
+
+    async fn save_external_channel_subscription(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        channel: ParsedChannelLink,
+    ) -> Result<()> {
+        let user_id = UserId::new(user_id);
+        EnsureUserUseCase::new(&self.store).execute(user_id).await?;
+        let subscription = SaveExternalChannelSubscriptionUseCase::new(&self.store, &self.clock)
+            .execute(SaveExternalChannelSubscriptionCommand {
+                user_id,
+                platform: channel_platform(channel.platform),
+                channel_id: channel.channel_id,
+                channel_name: channel.channel_name,
+                url: channel.url,
+            })
+            .await?;
+
+        self.send_text(
+            peer_id,
+            &format!(
+                "Подписка сохранена: {} ({}).\n{}",
+                subscription.channel_name, subscription.platform, subscription.url
+            ),
+        )
+        .await
+    }
+
+    async fn snooze_reminder(&self, peer_id: i64, reminder_id: i32, code: &str) -> Result<()> {
+        let Some(minutes) = snooze_code_to_minutes(code) else {
+            return self
+                .send_text(peer_id, "Не смог распознать интервал откладывания.")
+                .await;
+        };
+
+        let reminder = match SnoozeReminderUseCase::new(&self.store, &self.clock)
+            .execute(ReminderId::new(reminder_id), minutes)
+            .await
+        {
+            Ok(reminder) => reminder,
+            Err(ApplicationError::NotFound { .. }) => {
+                return self.send_text(peer_id, "Напоминание не найдено.").await;
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        self.send_text(
+            peer_id,
+            &format!(
+                "Напоминание отложено на {}.\nНовое время: {}",
+                snooze_code_to_label(code),
+                reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+            ),
+        )
+        .await
     }
 
     async fn send_notification(&self, peer_id: i64, notification: Notification) -> Result<()> {
@@ -577,4 +657,36 @@ fn format_snooze_buttons(buttons: &[SnoozeDuration]) -> String {
         .map(|button| format!("{} мин", button.minutes()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn channel_platform(platform: ChannelPlatform) -> Platform {
+    match platform {
+        ChannelPlatform::Twitch => Platform::Twitch,
+        ChannelPlatform::Youtube => Platform::Youtube,
+    }
+}
+
+fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {
+    compare_optional_due(left, right).then_with(|| left.created_at.cmp(&right.created_at))
+}
+
+fn compare_optional_due(left: &Task, right: &Task) -> Ordering {
+    match (left.due_at.as_ref(), right.due_at.as_ref()) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn format_active_tasks(tasks: &[Task]) -> String {
+    let mut text = String::from("Активные задачи:\n");
+    for (index, task) in tasks.iter().enumerate() {
+        let due_at = task
+            .due_at
+            .map(|due_at| due_at.format("%d.%m.%Y %H:%M UTC").to_string())
+            .unwrap_or_else(|| "без срока".to_string());
+        text.push_str(&format!("{}. {} - {}\n", index + 1, task.title, due_at));
+    }
+    text
 }

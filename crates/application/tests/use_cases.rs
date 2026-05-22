@@ -8,9 +8,9 @@ use application::{
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
     ExternalChannelSubscriptionRepository, InterpretedTask, NaturalLanguageInterpreter,
     Notification, Notifier, PaymentGateway, PaymentRepository, ReferralRepository,
-    ReminderPreferencesRepository, ReminderRepository, SnoozeReminderUseCase,
-    StreamPlatformGateway, TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository,
-    UserRepository,
+    ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
+    TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -218,18 +218,39 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .unwrap();
     assert_eq!(payment.status, PaymentStatus::Succeeded);
 
-    store
-        .save_external_channel_subscription(&ChannelSubscription::new(
+    let saved_subscription = SaveExternalChannelSubscriptionUseCase::new(&store, &store)
+        .execute(SaveExternalChannelSubscriptionCommand {
             user_id,
-            Platform::Twitch,
-            "channel",
-            "Channel",
-            "https://twitch.tv/channel",
-            1,
-            fixed_now(),
-        ))
+            platform: Platform::Twitch,
+            channel_id: "channel".to_string(),
+            channel_name: "Channel".to_string(),
+            url: "https://twitch.tv/channel".to_string(),
+        })
         .await
         .unwrap();
+    assert_eq!(saved_subscription.sub_num, 1);
+
+    let updated_subscription = SaveExternalChannelSubscriptionUseCase::new(&store, &store)
+        .execute(SaveExternalChannelSubscriptionCommand {
+            user_id,
+            platform: Platform::Twitch,
+            channel_id: "channel".to_string(),
+            channel_name: "Channel Live".to_string(),
+            url: "https://twitch.tv/channel".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated_subscription.sub_num, 1);
+    assert_eq!(updated_subscription.created_at, fixed_now());
+    assert_eq!(
+        store
+            .list_external_channel_subscriptions(user_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
     store.set_latest_content("channel", Some("stream-1".to_string()));
     let changed = CheckTwitchStreamsUseCase::new(&store, &store)
         .execute(user_id)

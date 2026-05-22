@@ -6,7 +6,10 @@ pub mod subscription;
 pub mod task;
 pub mod user;
 
-pub use channels::CheckTwitchStreamsUseCase;
+pub use channels::{
+    CheckTwitchStreamsUseCase, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase,
+};
 pub use payment::{
     CreatePaymentCommand, CreatePaymentUseCase, CreatedPayment, ProcessYooKassaWebhookUseCase,
 };

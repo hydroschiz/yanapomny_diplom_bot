@@ -24,6 +24,7 @@ pub use use_cases::{
     CreateTaskCommand, CreateTaskFromTextUseCase, CreateTaskUseCase, CreatedPayment,
     CreatedReminderFromText, DeleteTaskUseCase, DeliverDueRemindersUseCase, DeliveryReport,
     EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ListTasksUseCase,
-    ProcessYooKassaWebhookUseCase, ProfileView, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
+    ProcessYooKassaWebhookUseCase, ProfileView, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase, UpdatePreferencesUseCase,
 };
