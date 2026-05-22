@@ -5,6 +5,7 @@
 
 pub mod event;
 pub mod keyboard;
+pub mod long_poll;
 pub mod sender;
 
 pub use event::{
@@ -15,4 +16,5 @@ pub use keyboard::{
     convert_keyboard, convert_keyboard_to_vk_api, sanitize_keyboard, vk_inline_capabilities,
     VkButton, VkKeyboard,
 };
+pub use long_poll::{run_long_poll, VkEventHandler};
 pub use sender::{random_id, VkTransport};

@@ -26,14 +26,7 @@ use presentation::{
 };
 use tracing::{error, info};
 use transport_core::BotTransport;
-use transport_vk::{normalize_event, VkIncomingEvent, VkTransport};
-use vk_bot_api::{
-    api::VkApi,
-    bot::VkBot,
-    error::{VkError, VkResult},
-    handler::MessageHandler,
-    models::Event,
-};
+use transport_vk::{run_long_poll, VkEventHandler, VkIncomingEvent, VkTransport};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,15 +51,9 @@ async fn main() -> Result<()> {
         renderer: Renderer,
     };
 
-    let mut bot = VkBot::builder()
-        .token(config.vk_access_token)
-        .group_id(config.vk_group_id)
-        .build()?;
-    bot.add_handler(handler);
-
     info!(group_id = config.vk_group_id, "starting VK bot service");
     tokio::select! {
-        result = bot.run() => result?,
+        result = run_long_poll(config.vk_access_token, config.vk_group_id, handler) => result?,
         () = shutdown_signal() => {}
     }
 
@@ -150,20 +137,14 @@ impl DialogStateStore for DialogStateMemory {
 }
 
 #[async_trait]
-impl MessageHandler for BotHandler {
-    async fn handle(&self, event: &Event, _api: &VkApi) -> VkResult<()> {
-        self.handle_event(event)
-            .await
-            .map_err(|error| VkError::Custom(error.to_string()))
+impl VkEventHandler for BotHandler {
+    async fn handle_vk_event(&self, event: VkIncomingEvent) -> Result<()> {
+        self.handle_event(event).await
     }
 }
 
 impl BotHandler {
-    async fn handle_event(&self, event: &Event) -> Result<()> {
-        let Some(event) = normalize_event(event) else {
-            return Ok(());
-        };
-
+    async fn handle_event(&self, event: VkIncomingEvent) -> Result<()> {
         match event {
             VkIncomingEvent::Message(message) => {
                 let incoming = IncomingMessage {

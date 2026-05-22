@@ -21,4 +21,3 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 transport-core = { workspace = true }
 transport-vk = { workspace = true }
-vk-bot-api = "1.0"

@@ -221,7 +221,6 @@ dependencies = [
  "tracing-subscriber",
  "transport-core",
  "transport-vk",
- "vk-bot-api",
 ]
 
 [[package]]
