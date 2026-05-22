@@ -1,14 +1,10 @@
-use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
 use application::{
-    active_tasks, ApplicationError, ApplicationResult, CreateReminderFromTextCommand,
-    CreateReminderFromTextUseCase, DialogState, DialogStateStore, EnsureSubscriptionUseCase,
-    EnsureUserUseCase, GetProfileUseCase, ListTasksUseCase, SaveExternalChannelSubscriptionCommand,
+    active_tasks, ApplicationError, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
+    ListTasksUseCase, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase,
 };
@@ -42,10 +38,10 @@ async fn main() -> Result<()> {
 
     let handler = BotHandler {
         transport,
-        store,
+        store: store.clone(),
         llm,
         clock: SystemClock,
-        state_store: DialogStateMemory::default(),
+        state_store: store,
         bot_username: config.bot_username.clone(),
         router: Router,
         renderer: Renderer,
@@ -107,33 +103,10 @@ struct BotHandler {
     store: MongoStore,
     llm: HttpLlmInterpreter,
     clock: SystemClock,
-    state_store: DialogStateMemory,
+    state_store: MongoStore,
     bot_username: String,
     router: Router,
     renderer: Renderer,
-}
-
-#[derive(Clone, Default)]
-struct DialogStateMemory {
-    states: Arc<Mutex<HashMap<UserId, DialogState>>>,
-}
-
-#[async_trait]
-impl DialogStateStore for DialogStateMemory {
-    async fn get_state(&self, user_id: UserId) -> ApplicationResult<DialogState> {
-        Ok(self
-            .states
-            .lock()
-            .unwrap()
-            .get(&user_id)
-            .cloned()
-            .unwrap_or(DialogState::Idle))
-    }
-
-    async fn set_state(&self, user_id: UserId, state: DialogState) -> ApplicationResult<()> {
-        self.states.lock().unwrap().insert(user_id, state);
-        Ok(())
-    }
 }
 
 #[async_trait]

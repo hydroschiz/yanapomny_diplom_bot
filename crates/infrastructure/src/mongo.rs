@@ -1,8 +1,9 @@
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
-    ExternalChannelSubscriptionRepository, PaymentRepository, PaymentTransactionRepository,
-    ReferralRepository, ReminderPreferencesRepository, ReminderRepository, SubscriptionRepository,
-    TaskRepository, UserPreferencesRepository, UserRepository,
+    DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, PaymentRepository,
+    PaymentTransactionRepository, ReferralRepository, ReminderPreferencesRepository,
+    ReminderRepository, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
+    UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -40,6 +41,7 @@ const SUBSCRIPTIONS_COLLECTION: &str = "subscriptions";
 const PAYMENTS_COLLECTION: &str = "payments";
 const REFERRALS_COLLECTION: &str = "referrals";
 const EXTERNAL_CHANNEL_SUBSCRIPTIONS_COLLECTION: &str = "external_channel_subscriptions";
+const DIALOG_STATES_COLLECTION: &str = "dialog_states";
 
 #[derive(Clone)]
 pub struct MongoStore {
@@ -91,6 +93,10 @@ impl MongoStore {
     fn external_channel_subscriptions(&self) -> Collection<ExternalChannelSubscriptionDto> {
         self.db
             .collection(EXTERNAL_CHANNEL_SUBSCRIPTIONS_COLLECTION)
+    }
+
+    fn dialog_states(&self) -> Collection<DialogStateDto> {
+        self.db.collection(DIALOG_STATES_COLLECTION)
     }
 
     async fn ensure_indexes(&self) -> ApplicationResult<()> {
@@ -257,6 +263,39 @@ impl MongoStore {
             .await
             .map_err(repo_err)?;
 
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DialogStateStore for MongoStore {
+    async fn get_state(&self, user_id: UserId) -> ApplicationResult<DialogState> {
+        let dto = self
+            .dialog_states()
+            .find_one(doc! { "_id": user_id.value() }, None)
+            .await
+            .map_err(repo_err)?;
+
+        Ok(dto
+            .map(|state| dialog_state_from_str(&state.state))
+            .unwrap_or(DialogState::Idle))
+    }
+
+    async fn set_state(&self, user_id: UserId, state: DialogState) -> ApplicationResult<()> {
+        let dto = DialogStateDto {
+            user_id: user_id.value(),
+            state: dialog_state_to_str(&state).to_string(),
+        };
+        self.dialog_states()
+            .replace_one(
+                doc! { "_id": dto.user_id },
+                dto,
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
+            )
+            .await
+            .map_err(repo_err)?;
         Ok(())
     }
 }
@@ -757,6 +796,13 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
             .map_err(repo_err)?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DialogStateDto {
+    #[serde(rename = "_id")]
+    user_id: i64,
+    state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2023,6 +2069,24 @@ fn platform_from_str(value: &str) -> Platform {
     }
 }
 
+fn dialog_state_to_str(value: &DialogState) -> &'static str {
+    match value {
+        DialogState::Idle => "idle",
+        DialogState::AwaitingUtc => "awaiting_utc",
+        DialogState::AwaitingSnoozeButtons => "awaiting_snooze_buttons",
+        DialogState::AwaitingAutoSnooze => "awaiting_auto_snooze",
+    }
+}
+
+fn dialog_state_from_str(value: &str) -> DialogState {
+    match value {
+        "awaiting_utc" => DialogState::AwaitingUtc,
+        "awaiting_snooze_buttons" => DialogState::AwaitingSnoozeButtons,
+        "awaiting_auto_snooze" => DialogState::AwaitingAutoSnooze,
+        _ => DialogState::Idle,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2143,5 +2207,24 @@ mod tests {
         assert_eq!(document.get_i64("subject_id").unwrap(), 7);
         assert!(!document.contains_key("sub_num"));
         assert!(!document.contains_key("subNum"));
+    }
+
+    #[test]
+    fn dialog_state_dto_uses_user_id_as_document_id() {
+        let dto = DialogStateDto {
+            user_id: 7,
+            state: dialog_state_to_str(&DialogState::AwaitingAutoSnooze).to_string(),
+        };
+
+        let document = bson::to_document(&dto).expect("dialog state should serialize");
+
+        assert_eq!(document.get_i64("_id").unwrap(), 7);
+        assert_eq!(document.get_str("state").unwrap(), "awaiting_auto_snooze");
+        assert!(!document.contains_key("user_id"));
+        assert_eq!(
+            dialog_state_from_str(document.get_str("state").unwrap()),
+            DialogState::AwaitingAutoSnooze
+        );
+        assert_eq!(dialog_state_from_str("unknown"), DialogState::Idle);
     }
 }
