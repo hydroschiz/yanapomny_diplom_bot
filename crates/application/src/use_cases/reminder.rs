@@ -1,11 +1,13 @@
 use chrono::{DateTime, Utc};
 use domain::{
-    ChatId, DeliveryChannel, DeliveryEvent, Reminder, ReminderId, RetryPolicy, Schedule, TaskId,
+    ChatId, DeliveryChannel, DeliveryEvent, Reminder, ReminderId, RetryPolicy, Schedule, Task,
+    TaskId, TaskPriority, User, UserId,
 };
 
 use crate::{
-    ApplicationError, ApplicationResult, Clock, DeliveryEventRepository, Notification, Notifier,
-    ReminderPreferencesRepository, ReminderRepository,
+    ApplicationError, ApplicationResult, Clock, DeliveryEventRepository,
+    NaturalLanguageInterpreter, Notification, Notifier, ReminderPreferencesRepository,
+    ReminderRepository, TaskRepository, UserRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,92 @@ where
             reminder.attach_task(task_id);
         }
         self.reminders.create_reminder(reminder).await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateReminderFromTextCommand {
+    pub user_id: UserId,
+    pub chat_id: ChatId,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedReminderFromText {
+    pub task: Task,
+    pub reminder: Reminder,
+}
+
+pub struct CreateReminderFromTextUseCase<'a, U, T, R, I, C> {
+    users: &'a U,
+    tasks: &'a T,
+    reminders: &'a R,
+    interpreter: &'a I,
+    clock: &'a C,
+}
+
+impl<'a, U, T, R, I, C> CreateReminderFromTextUseCase<'a, U, T, R, I, C>
+where
+    U: UserRepository,
+    T: TaskRepository,
+    R: ReminderRepository,
+    I: NaturalLanguageInterpreter,
+    C: Clock,
+{
+    pub const fn new(
+        users: &'a U,
+        tasks: &'a T,
+        reminders: &'a R,
+        interpreter: &'a I,
+        clock: &'a C,
+    ) -> Self {
+        Self {
+            users,
+            tasks,
+            reminders,
+            interpreter,
+            clock,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        command: CreateReminderFromTextCommand,
+    ) -> ApplicationResult<CreatedReminderFromText> {
+        let user = self.ensure_user(command.user_id).await?;
+        let interpreted = self
+            .interpreter
+            .interpret_task(&command.text, &user)
+            .await?;
+        let now = self.clock.now();
+        let mut task = Task::new(command.user_id, interpreted.title.clone(), now);
+        task.description = interpreted.description;
+        task.priority = TaskPriority::Normal;
+        task.due_at = Some(interpreted.trigger_at);
+        let task = self.tasks.create_task(task).await?;
+
+        let mut reminder = Reminder::new(
+            command.chat_id,
+            interpreted.title,
+            interpreted.schedule,
+            interpreted.trigger_at,
+        );
+        if let Some(task_id) = task.id {
+            reminder.attach_task(task_id);
+        }
+        let reminder = self.reminders.create_reminder(reminder).await?;
+
+        Ok(CreatedReminderFromText { task, reminder })
+    }
+
+    async fn ensure_user(&self, user_id: UserId) -> ApplicationResult<User> {
+        if let Some(user) = self.users.find_user(user_id).await? {
+            return Ok(user);
+        }
+
+        let user = User::new(user_id);
+        self.users.save_user(&user).await?;
+        Ok(user)
     }
 }
 

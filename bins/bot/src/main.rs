@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use application::{
-    CreateReminderCommand, CreateReminderUseCase, CreateTaskCommand, CreateTaskUseCase,
-    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, NaturalLanguageInterpreter,
-    SetUserTimezoneUseCase,
+    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, EnsureSubscriptionUseCase,
+    EnsureUserUseCase, GetProfileUseCase, SetUserTimezoneUseCase,
 };
 use async_trait::async_trait;
-use domain::{ChatId, SubscriptionPolicy, TaskPriority, TimePreferences, UserId};
+use domain::{ChatId, SubscriptionPolicy, TimePreferences, UserId};
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
 };
@@ -341,27 +340,20 @@ impl BotHandler {
     }
 
     async fn create_task_and_reminder(&self, peer_id: i64, user_id: i64, text: &str) -> Result<()> {
-        let user_id = UserId::new(user_id);
-        let user = EnsureUserUseCase::new(&self.store).execute(user_id).await?;
-        let interpreted = self.llm.interpret_task(text, &user).await?;
-        let task = CreateTaskUseCase::new(&self.store, &self.clock)
-            .execute(CreateTaskCommand {
-                user_id,
-                title: interpreted.title.clone(),
-                description: interpreted.description.clone(),
-                priority: TaskPriority::Normal,
-                due_at: Some(interpreted.trigger_at),
-            })
-            .await?;
-        let reminder = CreateReminderUseCase::new(&self.store)
-            .execute(CreateReminderCommand {
-                task_id: task.id,
-                chat_id: ChatId::new(peer_id),
-                text: interpreted.title.clone(),
-                schedule: interpreted.schedule,
-                next_at: interpreted.trigger_at,
-            })
-            .await?;
+        let created = CreateReminderFromTextUseCase::new(
+            &self.store,
+            &self.store,
+            &self.store,
+            &self.llm,
+            &self.clock,
+        )
+        .execute(CreateReminderFromTextCommand {
+            user_id: UserId::new(user_id),
+            chat_id: ChatId::new(peer_id),
+            text: text.to_string(),
+        })
+        .await?;
+        let reminder = created.reminder;
 
         let text = format!(
             "Запомнил: {}\nСработает: {}",

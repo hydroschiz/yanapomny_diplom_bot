@@ -20,8 +20,9 @@ pub use ports::{
 pub use use_cases::{
     active_tasks, CheckTwitchStreamsUseCase, CompleteTaskUseCase, ConsumeReferralRewardUseCase,
     CreatePaymentCommand, CreatePaymentUseCase, CreateReferralUseCase, CreateReminderCommand,
-    CreateReminderUseCase, CreateTaskCommand, CreateTaskFromTextUseCase, CreateTaskUseCase,
-    CreatedPayment, DeleteTaskUseCase, DeliverDueRemindersUseCase, DeliveryReport,
+    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, CreateReminderUseCase,
+    CreateTaskCommand, CreateTaskFromTextUseCase, CreateTaskUseCase, CreatedPayment,
+    CreatedReminderFromText, DeleteTaskUseCase, DeliverDueRemindersUseCase, DeliveryReport,
     EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ListTasksUseCase,
     ProcessYooKassaWebhookUseCase, ProfileView, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase, UpdatePreferencesUseCase,

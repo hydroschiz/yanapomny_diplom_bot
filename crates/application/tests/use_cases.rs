@@ -3,7 +3,8 @@ use std::{collections::HashMap, sync::Mutex};
 use application::{
     active_tasks, CheckTwitchStreamsUseCase, Clock, CompleteTaskUseCase,
     ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
-    CreateReferralUseCase, CreateReminderCommand, CreateReminderUseCase, CreateTaskFromTextUseCase,
+    CreateReferralUseCase, CreateReminderCommand, CreateReminderFromTextCommand,
+    CreateReminderFromTextUseCase, CreateReminderUseCase, CreateTaskFromTextUseCase,
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
     ExternalChannelSubscriptionRepository, InterpretedTask, NaturalLanguageInterpreter,
     Notification, Notifier, PaymentGateway, PaymentRepository, ReferralRepository,
@@ -51,6 +52,46 @@ async fn task_text_interpretation_and_lifecycle_use_cases_work() {
 
     assert_eq!(task.status, TaskStatus::Completed);
     assert!(active_tasks(store.list_tasks(user.id).await.unwrap()).is_empty());
+}
+
+#[tokio::test]
+async fn reminder_from_text_use_case_creates_user_task_and_reminder() {
+    let store = AppMemory::new(fixed_now());
+    let user_id = UserId::new(8);
+    let chat_id = ChatId::new(88);
+    let schedule = Schedule::Recurring {
+        time: TimeSpec::default(),
+        recurrence: RecurrenceRule::default(),
+    };
+    store.set_interpretation(
+        user_id,
+        "каждый день зарядка",
+        InterpretedTask {
+            title: "зарядка".to_string(),
+            description: Some("из LLM".to_string()),
+            schedule: schedule.clone(),
+            trigger_at: fixed_now() + Duration::hours(2),
+        },
+    );
+
+    let created = CreateReminderFromTextUseCase::new(&store, &store, &store, &store, &store)
+        .execute(CreateReminderFromTextCommand {
+            user_id,
+            chat_id,
+            text: "каждый день зарядка".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(store.find_user(user_id).await.unwrap().is_some());
+    assert_eq!(created.task.id, Some(TaskId::new(1)));
+    assert_eq!(created.task.description.as_deref(), Some("из LLM"));
+    assert_eq!(created.task.due_at, Some(fixed_now() + Duration::hours(2)));
+    assert_eq!(created.reminder.task_id, created.task.id);
+    assert_eq!(created.reminder.chat_id, chat_id);
+    assert_eq!(created.reminder.text, "зарядка");
+    assert_eq!(created.reminder.schedule, schedule);
+    assert_eq!(created.reminder.next_at, fixed_now() + Duration::hours(2));
 }
 
 #[tokio::test]
