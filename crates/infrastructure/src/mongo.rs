@@ -807,6 +807,25 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
             .map_err(repo_err)?;
         Ok(())
     }
+
+    async fn delete_external_channel_subscription(
+        &self,
+        subscription: &ExternalChannelSubscription,
+    ) -> ApplicationResult<()> {
+        self.external_channel_subscriptions()
+            .delete_one(
+                doc! {
+                    "subject_type": "user",
+                    "subject_id": subscription.user_id.value(),
+                    "platform": platform_to_str(subscription.platform),
+                    "channel_id": subscription.channel_id.clone(),
+                },
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2088,6 +2107,9 @@ fn dialog_state_to_str(value: &DialogState) -> &'static str {
         DialogState::AwaitingSnoozeButtons => "awaiting_snooze_buttons",
         DialogState::AwaitingAutoSnooze => "awaiting_auto_snooze",
         DialogState::AwaitingReminderDeletion => "awaiting_reminder_deletion",
+        DialogState::AwaitingChannelSubscriptionDeletion => {
+            "awaiting_channel_subscription_deletion"
+        }
     }
 }
 
@@ -2097,6 +2119,9 @@ fn dialog_state_from_str(value: &str) -> DialogState {
         "awaiting_snooze_buttons" => DialogState::AwaitingSnoozeButtons,
         "awaiting_auto_snooze" => DialogState::AwaitingAutoSnooze,
         "awaiting_reminder_deletion" => DialogState::AwaitingReminderDeletion,
+        "awaiting_channel_subscription_deletion" => {
+            DialogState::AwaitingChannelSubscriptionDeletion
+        }
         _ => DialogState::Idle,
     }
 }

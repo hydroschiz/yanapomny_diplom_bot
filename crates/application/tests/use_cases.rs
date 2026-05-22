@@ -5,13 +5,14 @@ use application::{
     CompleteTaskUseCase, ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
     CreateReferralUseCase, CreateReminderCommand, CreateReminderFromTextCommand,
     CreateReminderFromTextUseCase, CreateReminderUseCase, CreateTaskFromTextUseCase,
+    DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
     ExternalChannelSubscriptionRepository, InterpretedTask, ListActiveRemindersUseCase,
-    NaturalLanguageInterpreter, Notification, Notifier, PaymentGateway, PaymentRepository,
-    ReferralRepository, ReminderActionCommand, ReminderPreferencesRepository, ReminderRepository,
-    SaveExternalChannelSubscriptionCommand, SaveExternalChannelSubscriptionUseCase,
-    SnoozeReminderUseCase, StreamPlatformGateway, TaskRepository, UpdatePreferencesUseCase,
-    UserPreferencesRepository, UserRepository,
+    ListExternalChannelSubscriptionsUseCase, NaturalLanguageInterpreter, Notification, Notifier,
+    PaymentGateway, PaymentRepository, ReferralRepository, ReminderActionCommand,
+    ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
+    TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -340,6 +341,29 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .await
         .unwrap();
     assert_eq!(changed.len(), 1);
+
+    let listed = ListExternalChannelSubscriptionsUseCase::new(&store)
+        .execute(user_id)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].sub_num, 1);
+    assert_eq!(listed[0].channel_name, "Channel Live");
+
+    let deleted = DeleteExternalChannelSubscriptionUseCase::new(&store)
+        .execute(DeleteExternalChannelSubscriptionCommand {
+            user_id,
+            sub_num: 1,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted.channel_id, "channel");
+    assert!(ListExternalChannelSubscriptionsUseCase::new(&store)
+        .execute(user_id)
+        .await
+        .unwrap()
+        .is_empty());
 
     let referral = CreateReferralUseCase::new(&store, &store)
         .execute(UserId::new(1), user_id)
@@ -704,6 +728,20 @@ impl ExternalChannelSubscriptionRepository for AppMemory {
             *existing = subscription.clone();
         } else {
             subscriptions.push(subscription.clone());
+        }
+        Ok(())
+    }
+
+    async fn delete_external_channel_subscription(
+        &self,
+        subscription: &ChannelSubscription,
+    ) -> application::ApplicationResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(subscriptions) = state.channels.get_mut(&subscription.user_id) {
+            subscriptions.retain(|existing| {
+                existing.platform != subscription.platform
+                    || existing.channel_id != subscription.channel_id
+            });
         }
         Ok(())
     }

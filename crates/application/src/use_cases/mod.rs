@@ -7,8 +7,9 @@ pub mod task;
 pub mod user;
 
 pub use channels::{
-    CheckTwitchStreamsUseCase, SaveExternalChannelSubscriptionCommand,
-    SaveExternalChannelSubscriptionUseCase,
+    CheckTwitchStreamsUseCase, DeleteExternalChannelSubscriptionCommand,
+    DeleteExternalChannelSubscriptionUseCase, ListExternalChannelSubscriptionsUseCase,
+    SaveExternalChannelSubscriptionCommand, SaveExternalChannelSubscriptionUseCase,
 };
 pub use payment::{
     CreatePaymentCommand, CreatePaymentUseCase, CreatedPayment, ProcessYooKassaWebhookUseCase,

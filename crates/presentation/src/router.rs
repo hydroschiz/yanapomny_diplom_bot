@@ -53,6 +53,7 @@ impl From<DialogState> for ConversationState {
             DialogState::AwaitingSnoozeButtons => Self::AwaitingSnoozeButtons,
             DialogState::AwaitingAutoSnooze => Self::AwaitingAutoSnooze,
             DialogState::AwaitingReminderDeletion => Self::AwaitingReminderDeletion,
+            DialogState::AwaitingChannelSubscriptionDeletion => Self::AwaitingSubDeleteNum,
         }
     }
 }

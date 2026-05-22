@@ -2,9 +2,10 @@ use std::{collections::HashMap, sync::Mutex};
 
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DialogState,
-    DialogStateStore, NaturalLanguageReminderParser, PaymentCachePort, PaymentGatewayPort,
-    PaymentTransactionRepository, ReferralRepository, ReminderPreferencesRepository,
-    ReminderRepository, StreamPlatformGateway, SubscriptionRepository, UserRepository,
+    DialogStateStore, ExternalChannelSubscriptionRepository, NaturalLanguageReminderParser,
+    PaymentCachePort, PaymentGatewayPort, PaymentTransactionRepository, ReferralRepository,
+    ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
+    SubscriptionRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -221,6 +222,37 @@ impl ChannelSubscriptionRepository for InMemoryStore {
             subscriptions.push(subscription.clone());
         }
 
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ExternalChannelSubscriptionRepository for InMemoryStore {
+    async fn list_external_channel_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Vec<ChannelSubscription>> {
+        self.list_channel_subscriptions(user_id).await
+    }
+
+    async fn save_external_channel_subscription(
+        &self,
+        subscription: &ChannelSubscription,
+    ) -> ApplicationResult<()> {
+        self.save_channel_subscription(subscription).await
+    }
+
+    async fn delete_external_channel_subscription(
+        &self,
+        subscription: &ChannelSubscription,
+    ) -> ApplicationResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(subscriptions) = state.channel_subscriptions.get_mut(&subscription.user_id) {
+            subscriptions.retain(|existing| {
+                existing.platform != subscription.platform
+                    || existing.channel_id != subscription.channel_id
+            });
+        }
         Ok(())
     }
 }

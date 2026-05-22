@@ -98,6 +98,10 @@ pub trait ExternalChannelSubscriptionRepository: Send + Sync {
         &self,
         subscription: &ExternalChannelSubscription,
     ) -> ApplicationResult<()>;
+    async fn delete_external_channel_subscription(
+        &self,
+        subscription: &ExternalChannelSubscription,
+    ) -> ApplicationResult<()>;
 }
 
 #[async_trait]
@@ -181,6 +185,7 @@ pub enum DialogState {
     AwaitingSnoozeButtons,
     AwaitingAutoSnooze,
     AwaitingReminderDeletion,
+    AwaitingChannelSubscriptionDeletion,
 }
 
 #[async_trait]

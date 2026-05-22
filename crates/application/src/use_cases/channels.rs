@@ -77,6 +77,84 @@ where
     }
 }
 
+pub struct ListExternalChannelSubscriptionsUseCase<'a, R> {
+    subscriptions: &'a R,
+}
+
+impl<'a, R> ListExternalChannelSubscriptionsUseCase<'a, R>
+where
+    R: ExternalChannelSubscriptionRepository,
+{
+    pub const fn new(subscriptions: &'a R) -> Self {
+        Self { subscriptions }
+    }
+
+    pub async fn execute(
+        &self,
+        user_id: UserId,
+    ) -> ApplicationResult<Vec<ExternalChannelSubscription>> {
+        Ok(numbered_external_channel_subscriptions(
+            self.subscriptions
+                .list_external_channel_subscriptions(user_id)
+                .await?,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteExternalChannelSubscriptionCommand {
+    pub user_id: UserId,
+    pub sub_num: i32,
+}
+
+pub struct DeleteExternalChannelSubscriptionUseCase<'a, R> {
+    subscriptions: &'a R,
+}
+
+impl<'a, R> DeleteExternalChannelSubscriptionUseCase<'a, R>
+where
+    R: ExternalChannelSubscriptionRepository,
+{
+    pub const fn new(subscriptions: &'a R) -> Self {
+        Self { subscriptions }
+    }
+
+    pub async fn execute(
+        &self,
+        command: DeleteExternalChannelSubscriptionCommand,
+    ) -> ApplicationResult<Option<ExternalChannelSubscription>> {
+        let subscription = numbered_external_channel_subscriptions(
+            self.subscriptions
+                .list_external_channel_subscriptions(command.user_id)
+                .await?,
+        )
+        .into_iter()
+        .find(|subscription| subscription.sub_num == command.sub_num);
+
+        if let Some(subscription) = subscription.as_ref() {
+            self.subscriptions
+                .delete_external_channel_subscription(subscription)
+                .await?;
+        }
+
+        Ok(subscription)
+    }
+}
+
+fn numbered_external_channel_subscriptions(
+    mut subscriptions: Vec<ExternalChannelSubscription>,
+) -> Vec<ExternalChannelSubscription> {
+    subscriptions.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.channel_id.cmp(&right.channel_id))
+    });
+    for (index, subscription) in subscriptions.iter_mut().enumerate() {
+        subscription.sub_num = (index + 1) as i32;
+    }
+    subscriptions
+}
+
 pub struct CheckTwitchStreamsUseCase<'a, R, G> {
     subscriptions: &'a R,
     gateway: &'a G,

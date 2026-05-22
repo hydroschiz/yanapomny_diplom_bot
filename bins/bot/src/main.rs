@@ -3,21 +3,23 @@ use std::cmp::Ordering;
 use anyhow::{Context, Result};
 use application::{
     active_tasks, ApplicationError, CancelReminderUseCase, CompleteReminderUseCase,
-    CreateReminderFromTextCommand, CreateReminderFromTextUseCase, DialogState, DialogStateStore,
-    EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase, ListActiveRemindersUseCase,
-    ListTasksUseCase, ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
+    CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
+    DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
+    ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase, ListTasksUseCase,
+    ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase,
 };
 use async_trait::async_trait;
 use domain::{
-    ChatId, Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy,
-    Task, TimePreferences, UserId,
+    ChatId, ExternalChannelSubscription, Platform, Reminder, ReminderId, ReminderStatus,
+    SnoozeDuration, SubscriptionPolicy, Task, TimePreferences, UserId,
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
 };
-use presentation::keyboard::{snooze_code_to_label, snooze_code_to_minutes};
+use presentation::keyboard::{channel_subs_keyboard, snooze_code_to_label, snooze_code_to_minutes};
 use presentation::{
     CallbackRoute, ChannelPlatform, IncomingCallback, IncomingMessage, MessageRoute, Notification,
     ParsedChannelLink, Renderer, RouteContext, Router, TimezoneDisplay,
@@ -283,11 +285,8 @@ impl BotHandler {
                     .await
             }
             MessageRoute::ShowSubscriptions => {
-                self.send_text(
-                    message.peer_id,
-                    "Отправьте ссылку Twitch или YouTube для подписки на канал.",
-                )
-                .await
+                self.show_channel_subscriptions(message.peer_id, message.user_id)
+                    .await
             }
             MessageRoute::ShowReferral => {
                 self.send_text(message.peer_id, "Реферальные ссылки VK временно отключены.")
@@ -306,7 +305,15 @@ impl BotHandler {
                 self.delete_reminder_from_input(message.peer_id, message.user_id, &input)
                     .await
             }
-            MessageRoute::ReminderEditText(_) | MessageRoute::ChannelDeletionInput(_) => {
+            MessageRoute::ChannelDeletionInput(input) => {
+                self.delete_channel_subscription_from_input(
+                    message.peer_id,
+                    message.user_id,
+                    &input,
+                )
+                .await
+            }
+            MessageRoute::ReminderEditText(_) => {
                 self.send_text(
                     message.peer_id,
                     "Этот ввод пока не ожидается новым service binary.",
@@ -412,6 +419,14 @@ impl BotHandler {
             }
             CallbackRoute::StartReminderDeletion => {
                 self.start_reminder_deletion(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::ShowSubscriptions => {
+                self.show_channel_subscriptions(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::StartSubscriptionDeletion => {
+                self.start_channel_subscription_deletion(callback.peer_id, callback.user_id)
                     .await
             }
             CallbackRoute::BackFromReminderDeletion | CallbackRoute::CancelReminder => {
@@ -528,6 +543,105 @@ impl BotHandler {
             ),
         )
         .await
+    }
+
+    async fn show_channel_subscriptions(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let subscriptions = self.channel_subscriptions_for_user(user_id).await?;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format_channel_subscriptions(&subscriptions),
+                keyboard: Some(channel_subs_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await
+    }
+
+    async fn start_channel_subscription_deletion(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let subscriptions = self.channel_subscriptions_for_user(user_id).await?;
+        if subscriptions.is_empty() {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self
+                .send_text(peer_id, "Подписок для удаления пока нет.")
+                .await;
+        }
+
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingChannelSubscriptionDeletion,
+            )
+            .await?;
+        self.send_text(
+            peer_id,
+            &format!(
+                "Введите номер подписки для удаления:\n{}",
+                format_channel_subscriptions_list(&subscriptions)
+            ),
+        )
+        .await
+    }
+
+    async fn delete_channel_subscription_from_input(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        input: &str,
+    ) -> Result<()> {
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("назад") || input == "/cancel" {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self.show_channel_subscriptions(peer_id, user_id).await;
+        }
+
+        let Ok(sub_num) = input.parse::<i32>() else {
+            return self
+                .send_text(peer_id, "Введите номер подписки из списка.")
+                .await;
+        };
+        if sub_num <= 0 {
+            return self
+                .send_text(peer_id, "Введите номер подписки из списка.")
+                .await;
+        }
+
+        let deleted = DeleteExternalChannelSubscriptionUseCase::new(&self.store)
+            .execute(DeleteExternalChannelSubscriptionCommand {
+                user_id: UserId::new(user_id),
+                sub_num,
+            })
+            .await?;
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::Idle)
+            .await?;
+
+        match deleted {
+            Some(subscription) => {
+                self.send_text(
+                    peer_id,
+                    &format!("Подписка удалена: {}", subscription.channel_name),
+                )
+                .await?;
+                self.show_channel_subscriptions(peer_id, user_id).await
+            }
+            None => {
+                self.send_text(peer_id, "Подписка с таким номером не найдена.")
+                    .await
+            }
+        }
+    }
+
+    async fn channel_subscriptions_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<ExternalChannelSubscription>> {
+        Ok(ListExternalChannelSubscriptionsUseCase::new(&self.store)
+            .execute(UserId::new(user_id))
+            .await?)
     }
 
     async fn snooze_reminder(&self, peer_id: i64, reminder_id: i32, code: &str) -> Result<()> {
@@ -780,6 +894,34 @@ fn format_active_reminders(reminders: &[Reminder]) -> String {
             index + 1,
             reminder.text,
             reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+        ));
+    }
+    text
+}
+
+fn format_channel_subscriptions(subscriptions: &[ExternalChannelSubscription]) -> String {
+    let intro =
+        "Отправьте ссылку Twitch или YouTube, и я буду уведомлять о новых видео и трансляциях.";
+    if subscriptions.is_empty() {
+        format!("{}\n\nВаши подписки: пока нет.", intro)
+    } else {
+        format!(
+            "{}\n\nВаши подписки:\n{}",
+            intro,
+            format_channel_subscriptions_list(subscriptions)
+        )
+    }
+}
+
+fn format_channel_subscriptions_list(subscriptions: &[ExternalChannelSubscription]) -> String {
+    let mut text = String::new();
+    for subscription in subscriptions {
+        text.push_str(&format!(
+            "{}. [{}] {} - {}\n",
+            subscription.sub_num,
+            subscription.platform,
+            subscription.channel_name,
+            subscription.url
         ));
     }
     text
