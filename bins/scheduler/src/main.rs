@@ -5,7 +5,7 @@ use application::{
     ApplicationError, ApplicationResult, DeliverDueRemindersUseCase, Notification, Notifier,
 };
 use async_trait::async_trait;
-use domain::RetryPolicy;
+use domain::{DeliveryChannel, RetryPolicy};
 use infrastructure::{MongoStore, SystemClock, TwitchGateway};
 use tracing::{error, info, warn};
 use transport_core::BotTransport;
@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
                     &notifier,
                     &clock,
                     RetryPolicy::default(),
+                    DeliveryChannel::Vk,
                 );
                 match use_case.execute(config.batch_size).await {
                     Ok(report) if report.claimed > 0 => info!(

@@ -90,6 +90,7 @@ pub struct DeliverDueRemindersUseCase<'a, R, D, P, N, C> {
     notifier: &'a N,
     clock: &'a C,
     retry_policy: RetryPolicy,
+    delivery_channel: DeliveryChannel,
 }
 
 impl<'a, R, D, P, N, C> DeliverDueRemindersUseCase<'a, R, D, P, N, C>
@@ -107,6 +108,7 @@ where
         notifier: &'a N,
         clock: &'a C,
         retry_policy: RetryPolicy,
+        delivery_channel: DeliveryChannel,
     ) -> Self {
         Self {
             reminders,
@@ -115,6 +117,7 @@ where
             notifier,
             clock,
             retry_policy,
+            delivery_channel,
         }
     }
 
@@ -131,7 +134,7 @@ where
                 ApplicationError::Repository("claimed reminder has no id".to_string())
             })?;
             let mut event =
-                DeliveryEvent::planned(reminder_id, DeliveryChannel::Vk, reminder.next_at);
+                DeliveryEvent::planned(reminder_id, self.delivery_channel, reminder.next_at);
 
             let result = self
                 .notifier

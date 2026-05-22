@@ -14,10 +14,10 @@ use application::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use domain::{
-    ChannelSubscription, ChatId, DeliveryEvent, DeliveryEventId, DeliveryResult, Money, Payment,
-    PaymentId, PaymentProvider, PaymentStatus, Platform, RecurrenceRule, Reminder, ReminderId,
-    ReminderStatus, RetryPolicy, Schedule, Task, TaskId, TaskStatus, TimePreferences, TimeSpec,
-    User, UserId, UserPreferences,
+    ChannelSubscription, ChatId, DeliveryChannel, DeliveryEvent, DeliveryEventId, DeliveryResult,
+    Money, Payment, PaymentId, PaymentProvider, PaymentStatus, Platform, RecurrenceRule, Reminder,
+    ReminderId, ReminderStatus, RetryPolicy, Schedule, Task, TaskId, TaskStatus, TimePreferences,
+    TimeSpec, User, UserId, UserPreferences,
 };
 
 #[tokio::test]
@@ -95,6 +95,7 @@ async fn reminder_snooze_and_delivery_use_cases_work() {
         &store,
         &store,
         RetryPolicy::default(),
+        DeliveryChannel::Vk,
     )
     .execute(10)
     .await
@@ -131,6 +132,7 @@ async fn recurring_reminders_reschedule_after_successful_delivery() {
         &store,
         &store,
         RetryPolicy::default(),
+        DeliveryChannel::Vk,
     )
     .execute(10)
     .await
