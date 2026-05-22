@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Payment, PaymentId,
-    PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription, Task, TaskId, User,
-    UserId, UserPreferences,
+    PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription, Task, TaskId,
+    TimePreferences, User, UserId, UserPreferences,
 };
 
 use crate::ApplicationResult;
@@ -63,6 +63,14 @@ pub trait DeliveryEventRepository: Send + Sync {
         &self,
         reminder_id: ReminderId,
     ) -> ApplicationResult<Vec<DeliveryEvent>>;
+}
+
+#[async_trait]
+pub trait ReminderPreferencesRepository: Send + Sync {
+    async fn find_time_preferences_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> ApplicationResult<TimePreferences>;
 }
 
 #[async_trait]

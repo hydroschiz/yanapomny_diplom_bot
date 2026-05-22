@@ -5,7 +5,7 @@ use domain::{
 
 use crate::{
     ApplicationError, ApplicationResult, Clock, DeliveryEventRepository, Notification, Notifier,
-    ReminderRepository,
+    ReminderPreferencesRepository, ReminderRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,24 +83,27 @@ pub struct DeliveryReport {
     pub failed: usize,
 }
 
-pub struct DeliverDueRemindersUseCase<'a, R, D, N, C> {
+pub struct DeliverDueRemindersUseCase<'a, R, D, P, N, C> {
     reminders: &'a R,
     delivery_events: &'a D,
+    preferences: &'a P,
     notifier: &'a N,
     clock: &'a C,
     retry_policy: RetryPolicy,
 }
 
-impl<'a, R, D, N, C> DeliverDueRemindersUseCase<'a, R, D, N, C>
+impl<'a, R, D, P, N, C> DeliverDueRemindersUseCase<'a, R, D, P, N, C>
 where
     R: ReminderRepository,
     D: DeliveryEventRepository,
+    P: ReminderPreferencesRepository,
     N: Notifier,
     C: Clock,
 {
     pub const fn new(
         reminders: &'a R,
         delivery_events: &'a D,
+        preferences: &'a P,
         notifier: &'a N,
         clock: &'a C,
         retry_policy: RetryPolicy,
@@ -108,6 +111,7 @@ where
         Self {
             reminders,
             delivery_events,
+            preferences,
             notifier,
             clock,
             retry_policy,
@@ -139,7 +143,11 @@ where
 
             match result {
                 Ok(()) => {
-                    reminder.mark_sent()?;
+                    let preferences = self
+                        .preferences
+                        .find_time_preferences_for_chat(reminder.chat_id)
+                        .await?;
+                    reminder.next_after_send(now, &preferences)?;
                     event.mark_sent(now);
                     report.delivered += 1;
                 }

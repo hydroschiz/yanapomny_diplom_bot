@@ -13,9 +13,9 @@ pub use ports::{
     ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
     NaturalLanguageInterpreter, NaturalLanguageReminderParser, Notification, Notifier,
     PaymentCachePort, PaymentGateway, PaymentGatewayPort, PaymentRepository,
-    PaymentTransactionRepository, ProfileNotification, ReferralRepository, ReminderRepository,
-    StreamPlatformGateway, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
-    UserRepository,
+    PaymentTransactionRepository, ProfileNotification, ReferralRepository,
+    ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
+    SubscriptionRepository, TaskRepository, UserPreferencesRepository, UserRepository,
 };
 pub use use_cases::{
     active_tasks, CheckTwitchStreamsUseCase, CompleteTaskUseCase, ConsumeReferralRewardUseCase,

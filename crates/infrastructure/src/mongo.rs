@@ -1,8 +1,8 @@
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
     ExternalChannelSubscriptionRepository, PaymentRepository, PaymentTransactionRepository,
-    ReferralRepository, ReminderRepository, SubscriptionRepository, TaskRepository,
-    UserPreferencesRepository, UserRepository,
+    ReferralRepository, ReminderPreferencesRepository, ReminderRepository, SubscriptionRepository,
+    TaskRepository, UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -321,6 +321,32 @@ impl UserPreferencesRepository for MongoStore {
             .await
             .map_err(repo_err)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderPreferencesRepository for MongoStore {
+    async fn find_time_preferences_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> ApplicationResult<TimePreferences> {
+        let dto = self
+            .users()
+            .find_one(
+                doc! {
+                    "$or": [
+                        { "_id": chat_id.value() },
+                        { "identities.chat_id": chat_id.value() },
+                    ],
+                },
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        dto.map(User::try_from)
+            .transpose()
+            .map(|user| user.map(|user| user.time_preferences).unwrap_or_default())
     }
 }
 

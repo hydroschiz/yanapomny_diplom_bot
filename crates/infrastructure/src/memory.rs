@@ -3,14 +3,14 @@ use std::{collections::HashMap, sync::Mutex};
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DialogState,
     DialogStateStore, NaturalLanguageReminderParser, PaymentCachePort, PaymentGatewayPort,
-    PaymentTransactionRepository, ReferralRepository, ReminderRepository, StreamPlatformGateway,
-    SubscriptionRepository, UserRepository,
+    PaymentTransactionRepository, ReferralRepository, ReminderPreferencesRepository,
+    ReminderRepository, StreamPlatformGateway, SubscriptionRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     ChannelSubscription, ChatId, PaymentId, PaymentTransaction, Referral, Reminder, ReminderId,
-    Schedule, Subscription, User, UserId,
+    Schedule, Subscription, TimePreferences, User, UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +147,30 @@ impl ReminderRepository for InMemoryStore {
             .reminders
             .insert(id, reminder.clone());
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderPreferencesRepository for InMemoryStore {
+    async fn find_time_preferences_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> ApplicationResult<TimePreferences> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .users
+            .values()
+            .find(|user| {
+                user.id.value() == chat_id.value()
+                    || user
+                        .identities
+                        .iter()
+                        .any(|identity| identity.chat_id == Some(chat_id))
+            })
+            .map(|user| user.time_preferences.clone())
+            .unwrap_or_default())
     }
 }
 

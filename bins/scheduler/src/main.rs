@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
                 let use_case = DeliverDueRemindersUseCase::new(
                     &store,
                     &store,
+                    &store,
                     &notifier,
                     &clock,
                     RetryPolicy::default(),

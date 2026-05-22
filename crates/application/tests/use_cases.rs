@@ -7,15 +7,17 @@ use application::{
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
     ExternalChannelSubscriptionRepository, InterpretedTask, NaturalLanguageInterpreter,
     Notification, Notifier, PaymentGateway, PaymentRepository, ReferralRepository,
-    ReminderRepository, SnoozeReminderUseCase, StreamPlatformGateway, TaskRepository,
-    UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
+    ReminderPreferencesRepository, ReminderRepository, SnoozeReminderUseCase,
+    StreamPlatformGateway, TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository,
+    UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use domain::{
-    ChannelSubscription, ChatId, DeliveryEvent, DeliveryEventId, Money, Payment, PaymentId,
-    PaymentProvider, PaymentStatus, Platform, RecurrenceRule, Reminder, ReminderId, RetryPolicy,
-    Schedule, Task, TaskId, TaskStatus, TimeSpec, User, UserId, UserPreferences,
+    ChannelSubscription, ChatId, DeliveryEvent, DeliveryEventId, DeliveryResult, Money, Payment,
+    PaymentId, PaymentProvider, PaymentStatus, Platform, RecurrenceRule, Reminder, ReminderId,
+    ReminderStatus, RetryPolicy, Schedule, Task, TaskId, TaskStatus, TimePreferences, TimeSpec,
+    User, UserId, UserPreferences,
 };
 
 #[tokio::test]
@@ -86,16 +88,63 @@ async fn reminder_snooze_and_delivery_use_cases_work() {
         .await
         .unwrap();
 
-    let report =
-        DeliverDueRemindersUseCase::new(&store, &store, &store, &store, RetryPolicy::default())
-            .execute(10)
-            .await
-            .unwrap();
+    let report = DeliverDueRemindersUseCase::new(
+        &store,
+        &store,
+        &store,
+        &store,
+        &store,
+        RetryPolicy::default(),
+    )
+    .execute(10)
+    .await
+    .unwrap();
 
     assert_eq!(report.claimed, 1);
     assert_eq!(report.delivered, 1);
     assert_eq!(store.notifications().len(), 1);
     assert_eq!(store.events_for(due.id.unwrap()).len(), 1);
+    assert_eq!(store.reminder(due.id.unwrap()).status, ReminderStatus::Sent);
+}
+
+#[tokio::test]
+async fn recurring_reminders_reschedule_after_successful_delivery() {
+    let store = AppMemory::new(fixed_now());
+    let recurring = CreateReminderUseCase::new(&store)
+        .execute(CreateReminderCommand {
+            task_id: None,
+            chat_id: ChatId::new(7),
+            text: "daily".to_string(),
+            schedule: Schedule::Recurring {
+                time: TimeSpec::default(),
+                recurrence: RecurrenceRule::default(),
+            },
+            next_at: fixed_now() - Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+
+    let report = DeliverDueRemindersUseCase::new(
+        &store,
+        &store,
+        &store,
+        &store,
+        &store,
+        RetryPolicy::default(),
+    )
+    .execute(10)
+    .await
+    .unwrap();
+
+    let stored = store.reminder(recurring.id.unwrap());
+    let events = store.events_for(recurring.id.unwrap());
+
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.delivered, 1);
+    assert_eq!(stored.status, ReminderStatus::Active);
+    assert_eq!(stored.next_at, fixed_now() + Duration::days(1));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].result, DeliveryResult::Sent);
 }
 
 #[tokio::test]
@@ -222,6 +271,16 @@ impl AppMemory {
             .get(&reminder_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn reminder(&self, reminder_id: ReminderId) -> Reminder {
+        self.state
+            .lock()
+            .unwrap()
+            .reminders
+            .get(&reminder_id)
+            .cloned()
+            .unwrap()
     }
 }
 
@@ -358,6 +417,34 @@ impl ReminderRepository for AppMemory {
             }
         }
         Ok(claimed)
+    }
+}
+
+#[async_trait]
+impl ReminderPreferencesRepository for AppMemory {
+    async fn find_time_preferences_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> application::ApplicationResult<TimePreferences> {
+        let state = self.state.lock().unwrap();
+        let direct_user_id = UserId::new(chat_id.value());
+        if let Some(preferences) = state.preferences.get(&direct_user_id) {
+            return Ok(preferences.time_preferences.clone());
+        }
+
+        let user = state.users.values().find(|user| {
+            user.id.value() == chat_id.value()
+                || user
+                    .identities
+                    .iter()
+                    .any(|identity| identity.chat_id == Some(chat_id))
+        });
+
+        Ok(user
+            .and_then(|user| state.preferences.get(&user.id))
+            .map(|preferences| preferences.time_preferences.clone())
+            .or_else(|| user.map(|user| user.time_preferences.clone()))
+            .unwrap_or_default())
     }
 }
 
