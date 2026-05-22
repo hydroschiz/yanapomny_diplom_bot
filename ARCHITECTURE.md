@@ -29,7 +29,7 @@ cargo run -p webhook
 ```text
                          ┌──────────────────────────────┐
                          │          MongoDB             │
-                         │ users/reminds/records/tx     │
+                         │ reset schema, see docs/db_schema.md │
                          └──────────────┬───────────────┘
                                         │
 ┌──────────────────────┐    ┌───────────▼───────────┐    ┌──────────────────────┐

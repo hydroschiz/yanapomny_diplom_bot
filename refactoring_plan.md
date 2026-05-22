@@ -872,33 +872,33 @@ cargo run -p webhook
 - Удаление `src/` не ломает сборку workspace.
 - `grep` по imports из `src/*` в `crates` и `bins` пустой.
 
-### 12.13 Phase 9.9 — Database migration до целевой логической модели
+### 12.13 Phase 9.9 — MongoDB schema reset
 
-Цель: приблизить физическую Mongo schema к модели раздела 6 без одномоментного риска потери данных.
+Цель: зафиксировать финальную физическую MongoDB schema для post-cutover runtime без сохранения legacy compatibility в production path.
 
 Подход:
 
-1. Infrastructure сначала поддерживает legacy collections через mappers.
-2. Добавляются новые collections:
-   - `users`;
-   - `user_preferences`;
+1. Описать reset-схему и индексы в `docs/db_schema.md`.
+2. Переключить `crates/infrastructure::mongo` на reset field names и production collections:
+   - `users` с embedded `preferences` вместо отдельной `user_preferences` collection;
    - `tasks`;
    - `reminders`;
    - `delivery_events`;
-   - `subscriptions`;
-   - `payments`;
+   - `subscriptions` c `subject_type`/`subject_id`;
+   - `payments` как единый документ для payment provider state и transaction fulfillment metadata;
    - `referrals`;
-   - `external_channel_subscriptions`.
-3. Добавляется migration package или binary `bins/migrate`.
-4. Миграция имеет dry-run, idempotent run и backup instructions.
-5. После проверки services переключаются с legacy mapping на новую schema.
+   - `external_channel_subscriptions` без persisted display `sub_num`.
+3. Создавать индексы при `MongoStore::connect`.
+4. Не добавлять runtime fallback на legacy collections. Если нужны старые данные, это отдельный one-shot importer перед запуском сервисов на новой базе.
+5. `chats` остаётся зарезервированной schema collection до появления application `ChatRepository`.
 
 Критерии готовности:
 
-- Новая logical model совпадает с диаграммой раздела 6.
-- `DeliveryEvent` реально фиксирует попытки доставки.
+- `docs/db_schema.md` описывает production collections, fields, indexes, и migration policy.
+- `MongoStore` больше не пишет `user_preferences` collection.
+- `PaymentRepository` и `PaymentTransactionRepository` используют общий `payments` document без взаимного затирания полей.
+- `DeliveryEvent` фиксирует попытки доставки в `delivery_events`.
 - `Task` отделён от `Reminder`.
-- Есть migration tests на fixtures legacy BSON → new domain model.
 
 ### 12.14 Phase 9.10 — Enforcement и CI quality gates
 

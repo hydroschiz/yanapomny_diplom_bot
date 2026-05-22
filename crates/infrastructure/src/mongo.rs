@@ -1,38 +1,38 @@
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
-    ExternalChannelSubscriptionRepository, PaymentRepository, ReferralRepository,
-    ReminderRepository, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
-    UserRepository,
+    ExternalChannelSubscriptionRepository, PaymentRepository, PaymentTransactionRepository,
+    ReferralRepository, ReminderRepository, SubscriptionRepository, TaskRepository,
+    UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
     bson::{
-        doc,
+        self, doc,
         serde_helpers::{
             chrono_datetime_as_bson_datetime, chrono_datetime_as_bson_datetime_optional,
         },
+        Bson,
     },
-    options::{FindOneAndUpdateOptions, ReturnDocument},
-    Client, Collection, Database,
+    options::{FindOneAndUpdateOptions, IndexOptions, ReturnDocument, UpdateOptions},
+    Client, Collection, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
 
 use domain::{
     ChannelSubscription, ChatId, CommunicationPlatform, Currency, DayPosition, DeliveryChannel,
     DeliveryEvent, DeliveryEventId, DeliveryResult, ExternalChannelSubscription, FreeState,
-    IntervalUnit, Language, Money, NotificationPolicy, OffsetDirection, Payment, PaymentId,
-    PaymentProvider, PaymentStatus, Platform, PlatformIdentity, RecurrenceFilter,
-    RecurrencePattern, RecurrenceRule, Referral, Reminder, ReminderId, ReminderStatus, Schedule,
-    SnoozeDuration, SnoozePolicy, Subscription, SubscriptionId, SubscriptionPlan,
-    SubscriptionPolicy, SubscriptionSource, Task, TaskId, TaskPriority, TaskStatus, TimeOfDay,
-    TimePreferences, TimeSpec, TimeSpecType, TimeZone, User, UserId, UserPreferences, UserStatus,
-    UtcOffset, Weekday,
+    IntervalUnit, Language, Money, Months, NotificationPolicy, OffsetDirection, Payment, PaymentId,
+    PaymentProvider, PaymentStatus, PaymentTransaction, Platform, PlatformIdentity,
+    RecurrenceFilter, RecurrencePattern, RecurrenceRule, Referral, Reminder, ReminderId,
+    ReminderStatus, Schedule, SnoozeDuration, SnoozePolicy, Subscription, SubscriptionId,
+    SubscriptionPlan, SubscriptionPolicy, SubscriptionSource, Task, TaskId, TaskPriority,
+    TaskStatus, TimeOfDay, TimePreferences, TimeSpec, TimeSpecType, TimeZone, User, UserId,
+    UserPreferences, UserStatus, UtcOffset, Weekday,
 };
 
 const USERS_COLLECTION: &str = "users";
-const USER_PREFERENCES_COLLECTION: &str = "user_preferences";
 const TASKS_COLLECTION: &str = "tasks";
 const REMINDERS_COLLECTION: &str = "reminders";
 const DELIVERY_EVENTS_COLLECTION: &str = "delivery_events";
@@ -49,9 +49,11 @@ pub struct MongoStore {
 impl MongoStore {
     pub async fn connect(uri: &str, db_name: &str) -> ApplicationResult<Self> {
         let client = Client::with_uri_str(uri).await.map_err(repo_err)?;
-        Ok(Self {
+        let store = Self {
             db: client.database(db_name),
-        })
+        };
+        store.ensure_indexes().await?;
+        Ok(store)
     }
 
     pub fn new(db: Database) -> Self {
@@ -60,10 +62,6 @@ impl MongoStore {
 
     fn users(&self) -> Collection<UserDto> {
         self.db.collection(USERS_COLLECTION)
-    }
-
-    fn user_preferences(&self) -> Collection<UserPreferencesDto> {
-        self.db.collection(USER_PREFERENCES_COLLECTION)
     }
 
     fn tasks(&self) -> Collection<TaskDto> {
@@ -94,6 +92,173 @@ impl MongoStore {
         self.db
             .collection(EXTERNAL_CHANNEL_SUBSCRIPTIONS_COLLECTION)
     }
+
+    async fn ensure_indexes(&self) -> ApplicationResult<()> {
+        self.users()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "identities.platform": 1, "identities.external_id": 1 })
+                    .options(IndexOptions::builder().unique(true).sparse(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.users()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "identities.chat_id": 1 })
+                    .options(IndexOptions::builder().sparse(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.tasks()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "user_id": 1, "status": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.tasks()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "due_at": 1, "status": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.reminders()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "status": 1, "next_at": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.reminders()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "status": 1, "retry_at": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.reminders()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "chat_id": 1, "status": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.delivery_events()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "reminder_id": 1, "planned_at": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "subject_type": 1, "subject_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "expires_at": 1, "active": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.payments()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "provider_payment_id": 1 })
+                    .options(IndexOptions::builder().unique(true).sparse(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.payments()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "user_id": 1, "status": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.referrals()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "invited_user_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.referrals()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "referrer_user_id": 1, "invited_user_id": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        self.external_channel_subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {
+                        "subject_type": 1,
+                        "subject_id": 1,
+                        "platform": 1,
+                        "channel_id": 1,
+                    })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+        self.external_channel_subscriptions()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "platform": 1, "channel_id": 1 })
+                    .build(),
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -101,7 +266,7 @@ impl UserRepository for MongoStore {
     async fn find_user(&self, id: UserId) -> ApplicationResult<Option<User>> {
         let dto = self
             .users()
-            .find_one(doc! { "id": id.value() }, None)
+            .find_one(doc! { "_id": id.value() }, None)
             .await
             .map_err(repo_err)?;
         dto.map(TryInto::try_into).transpose()
@@ -111,7 +276,7 @@ impl UserRepository for MongoStore {
         let dto = UserDto::from(user.clone());
         self.users()
             .replace_one(
-                doc! { "id": dto.id },
+                doc! { "_id": dto.id },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -130,22 +295,28 @@ impl UserPreferencesRepository for MongoStore {
         user_id: UserId,
     ) -> ApplicationResult<Option<UserPreferences>> {
         let dto = self
-            .user_preferences()
-            .find_one(doc! { "userId": user_id.value() }, None)
+            .users()
+            .find_one(doc! { "_id": user_id.value() }, None)
             .await
             .map_err(repo_err)?;
-        dto.map(TryInto::try_into).transpose()
+        dto.map(|user| user.preferences.into_domain(user_id))
+            .transpose()
     }
 
     async fn save_preferences(&self, preferences: &UserPreferences) -> ApplicationResult<()> {
         let dto = UserPreferencesDto::from(preferences.clone());
-        self.user_preferences()
-            .replace_one(
-                doc! { "userId": dto.user_id },
-                dto,
-                mongodb::options::ReplaceOptions::builder()
-                    .upsert(true)
-                    .build(),
+        let preferences_bson = bson::to_bson(&dto).map_err(repo_err)?;
+        self.users()
+            .update_one(
+                doc! { "_id": preferences.user_id.value() },
+                doc! {
+                    "$set": { "preferences": preferences_bson },
+                    "$setOnInsert": {
+                        "status": "active",
+                        "identities": Bson::Array(Vec::new()),
+                    },
+                },
+                UpdateOptions::builder().upsert(true).build(),
             )
             .await
             .map_err(repo_err)?;
@@ -167,7 +338,7 @@ impl TaskRepository for MongoStore {
     async fn find_task(&self, id: TaskId) -> ApplicationResult<Option<Task>> {
         let dto = self
             .tasks()
-            .find_one(doc! { "id": id.value() }, None)
+            .find_one(doc! { "_id": id.value() }, None)
             .await
             .map_err(repo_err)?;
         dto.map(TryInto::try_into).transpose()
@@ -175,7 +346,7 @@ impl TaskRepository for MongoStore {
 
     async fn list_tasks(&self, user_id: UserId) -> ApplicationResult<Vec<Task>> {
         self.tasks()
-            .find(doc! { "userId": user_id.value() }, None)
+            .find(doc! { "user_id": user_id.value() }, None)
             .await
             .map_err(repo_err)?
             .map_err(repo_err)
@@ -189,7 +360,7 @@ impl TaskRepository for MongoStore {
         let dto = TaskDto::from(task.clone());
         self.tasks()
             .replace_one(
-                doc! { "id": id.value() },
+                doc! { "_id": id.value() },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -218,7 +389,7 @@ impl ReminderRepository for MongoStore {
     async fn find_reminder(&self, id: ReminderId) -> ApplicationResult<Option<Reminder>> {
         let dto = self
             .reminders()
-            .find_one(doc! { "id": id.value() }, None)
+            .find_one(doc! { "_id": id.value() }, None)
             .await
             .map_err(repo_err)?;
         dto.map(TryInto::try_into).transpose()
@@ -231,7 +402,7 @@ impl ReminderRepository for MongoStore {
         let dto = ReminderDto::from(reminder.clone());
         self.reminders()
             .replace_one(
-                doc! { "id": id.value() },
+                doc! { "_id": id.value() },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -250,8 +421,8 @@ impl ReminderRepository for MongoStore {
         let now_bson = mongodb::bson::DateTime::from_chrono(now);
         let filter = doc! {
             "$or": [
-                { "status": "active", "nextAt": { "$lte": now_bson } },
-                { "status": "retry", "retryAt": { "$lte": now_bson } }
+                { "status": "active", "next_at": { "$lte": now_bson } },
+                { "status": "retry", "retry_at": { "$lte": now_bson } }
             ]
         };
         let update = doc! { "$set": { "status": "processing" } };
@@ -300,7 +471,7 @@ impl DeliveryEventRepository for MongoStore {
         let dto = DeliveryEventDto::from(event.clone());
         self.delivery_events()
             .replace_one(
-                doc! { "id": id.value() },
+                doc! { "_id": id.value() },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -316,7 +487,7 @@ impl DeliveryEventRepository for MongoStore {
         reminder_id: ReminderId,
     ) -> ApplicationResult<Vec<DeliveryEvent>> {
         self.delivery_events()
-            .find(doc! { "reminderId": reminder_id.value() }, None)
+            .find(doc! { "reminder_id": reminder_id.value() }, None)
             .await
             .map_err(repo_err)?
             .map_err(repo_err)
@@ -331,7 +502,10 @@ impl SubscriptionRepository for MongoStore {
     async fn find_subscription(&self, chat_id: ChatId) -> ApplicationResult<Option<Subscription>> {
         let dto = self
             .subscriptions()
-            .find_one(doc! { "chatId": chat_id.value() }, None)
+            .find_one(
+                doc! { "subject_type": "chat", "subject_id": chat_id.value() },
+                None,
+            )
             .await
             .map_err(repo_err)?;
         dto.map(TryInto::try_into).transpose()
@@ -341,7 +515,7 @@ impl SubscriptionRepository for MongoStore {
         let dto = SubscriptionDto::from(subscription.clone());
         self.subscriptions()
             .replace_one(
-                doc! { "chatId": dto.chat_id },
+                doc! { "subject_type": dto.subject_type.clone(), "subject_id": dto.subject_id },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -358,21 +532,95 @@ impl PaymentRepository for MongoStore {
     async fn find_payment(&self, payment_id: &PaymentId) -> ApplicationResult<Option<Payment>> {
         let dto = self
             .payments()
-            .find_one(doc! { "id": payment_id.as_str() }, None)
+            .find_one(doc! { "_id": payment_id.as_str() }, None)
             .await
             .map_err(repo_err)?;
-        dto.map(TryInto::try_into).transpose()
+        dto.map(PaymentDto::try_into_payment).transpose()
     }
 
     async fn save_payment(&self, payment: &Payment) -> ApplicationResult<()> {
-        let dto = PaymentDto::from(payment.clone());
+        let dto = PaymentDto::from_payment(payment.clone());
+        let mut set = doc! {
+            "amount": dto.amount,
+            "currency": dto.currency.clone(),
+            "status": dto.status.clone(),
+            "created_at": bson_datetime(dto.created_at),
+        };
+        if let Some(provider) = dto.provider.clone() {
+            set.insert("provider", provider);
+        }
+        if let Some(subscription_id) = dto.subscription_id {
+            set.insert("subscription_id", subscription_id);
+        }
+        if let Some(provider_payment_id) = dto.provider_payment_id.clone() {
+            set.insert("provider_payment_id", provider_payment_id);
+        }
+
         self.payments()
-            .replace_one(
-                doc! { "id": dto.id.clone() },
-                dto,
-                mongodb::options::ReplaceOptions::builder()
-                    .upsert(true)
-                    .build(),
+            .update_one(
+                doc! { "_id": dto.payment_id.clone() },
+                doc! {
+                    "$set": set,
+                    "$setOnInsert": { "fulfilled": false },
+                },
+                UpdateOptions::builder().upsert(true).build(),
+            )
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PaymentTransactionRepository for MongoStore {
+    async fn find_payment_transaction(
+        &self,
+        payment_id: &PaymentId,
+    ) -> ApplicationResult<Option<PaymentTransaction>> {
+        let dto = self
+            .payments()
+            .find_one(doc! { "_id": payment_id.as_str() }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(PaymentDto::try_into_transaction).transpose()
+    }
+
+    async fn save_payment_transaction(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> ApplicationResult<()> {
+        let dto = PaymentDto::from_transaction(transaction.clone());
+        let mut set = doc! {
+            "amount": dto.amount,
+            "currency": dto.currency.clone(),
+            "status": dto.status.clone(),
+            "fulfilled": dto.fulfilled,
+            "created_at": bson_datetime(dto.created_at),
+        };
+        if let Some(user_id) = dto.user_id {
+            set.insert("user_id", user_id);
+        }
+        if let Some(updated_at) = dto.updated_at {
+            set.insert("updated_at", bson_datetime(updated_at));
+        }
+        if let Some(months) = dto.months {
+            set.insert("months", months);
+        }
+        if let Some(fulfilled_at) = dto.fulfilled_at {
+            set.insert("fulfilled_at", bson_datetime(fulfilled_at));
+        }
+        if let Some(idempotence_key) = dto.idempotence_key.clone() {
+            set.insert("idempotence_key", idempotence_key);
+        }
+        if let Some(provider) = dto.provider.clone() {
+            set.insert("provider", provider);
+        }
+
+        self.payments()
+            .update_one(
+                doc! { "_id": dto.payment_id.clone() },
+                doc! { "$set": set },
+                UpdateOptions::builder().upsert(true).build(),
             )
             .await
             .map_err(repo_err)?;
@@ -390,7 +638,7 @@ impl ReferralRepository for MongoStore {
         let dto = self
             .referrals()
             .find_one(
-                doc! { "referrerId": referrer_id.value(), "invitedId": invited_id.value() },
+                doc! { "referrer_user_id": referrer_id.value(), "invited_user_id": invited_id.value() },
                 None,
             )
             .await
@@ -402,7 +650,7 @@ impl ReferralRepository for MongoStore {
         let dto = ReferralDto::from(referral.clone());
         self.referrals()
             .replace_one(
-                doc! { "referrerId": dto.referrer_id, "invitedId": dto.invited_id },
+                doc! { "invited_user_id": dto.invited_id },
                 dto,
                 mongodb::options::ReplaceOptions::builder()
                     .upsert(true)
@@ -438,13 +686,27 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
         user_id: UserId,
     ) -> ApplicationResult<Vec<ExternalChannelSubscription>> {
         self.external_channel_subscriptions()
-            .find(doc! { "userId": user_id.value() }, None)
+            .find(
+                doc! { "subject_type": "user", "subject_id": user_id.value() },
+                None,
+            )
             .await
             .map_err(repo_err)?
             .map_err(repo_err)
             .and_then(|dto| futures::future::ready(dto.try_into()))
-            .try_collect()
+            .try_collect::<Vec<ExternalChannelSubscription>>()
             .await
+            .map(|mut subscriptions| {
+                subscriptions.sort_by(|left, right| {
+                    left.created_at
+                        .cmp(&right.created_at)
+                        .then_with(|| left.channel_id.cmp(&right.channel_id))
+                });
+                for (index, subscription) in subscriptions.iter_mut().enumerate() {
+                    subscription.sub_num = (index + 1) as i32;
+                }
+                subscriptions
+            })
     }
 
     async fn save_external_channel_subscription(
@@ -454,9 +716,16 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
         let dto = ExternalChannelSubscriptionDto::from(subscription.clone());
         self.external_channel_subscriptions()
             .replace_one(
-                doc! { "userId": dto.user_id, "platform": dto.platform.clone(), "channelId": dto.channel_id.clone() },
+                doc! {
+                    "subject_type": dto.subject_type.clone(),
+                    "subject_id": dto.subject_id,
+                    "platform": dto.platform.clone(),
+                    "channel_id": dto.channel_id.clone(),
+                },
                 dto,
-                mongodb::options::ReplaceOptions::builder().upsert(true).build(),
+                mongodb::options::ReplaceOptions::builder()
+                    .upsert(true)
+                    .build(),
             )
             .await
             .map_err(repo_err)?;
@@ -466,24 +735,26 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserDto {
+    #[serde(rename = "_id")]
     id: i64,
     status: String,
-    #[serde(default, with = "chrono_datetime_as_bson_datetime_optional")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
     created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     identities: Vec<PlatformIdentityDto>,
-    #[serde(rename = "timePreferences")]
-    time_preferences: TimePreferencesDto,
-    #[serde(rename = "snoozeButtons", default)]
-    snooze_buttons: Vec<u32>,
-    #[serde(rename = "autoSnooze")]
-    auto_snooze: u32,
-    #[serde(rename = "paymentInfo", default)]
+    #[serde(default)]
+    preferences: UserPreferencesDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     payment_info: Option<String>,
 }
 
 impl From<User> for UserDto {
     fn from(value: User) -> Self {
+        let preferences = value.preferences();
         Self {
             id: value.id.value(),
             status: user_status_to_str(value.status).to_string(),
@@ -493,13 +764,7 @@ impl From<User> for UserDto {
                 .into_iter()
                 .map(PlatformIdentityDto::from)
                 .collect(),
-            time_preferences: TimePreferencesDto::from(value.time_preferences),
-            snooze_buttons: value
-                .snooze_buttons
-                .into_iter()
-                .map(SnoozeDuration::minutes)
-                .collect(),
-            auto_snooze: value.auto_snooze.minutes(),
+            preferences: UserPreferencesDto::from(preferences),
             payment_info: value.payment_info,
         }
     }
@@ -519,13 +784,16 @@ impl TryFrom<UserDto> for User {
                 .into_iter()
                 .map(|identity| identity.into_domain(user_id))
                 .collect::<ApplicationResult<_>>()?,
-            time_preferences: value.time_preferences.try_into()?,
+            time_preferences: value.preferences.time_preferences.clone().try_into()?,
             snooze_buttons: value
-                .snooze_buttons
-                .into_iter()
+                .preferences
+                .snooze_policy
+                .buttons
+                .iter()
+                .copied()
                 .map(SnoozeDuration::from_minutes)
                 .collect(),
-            auto_snooze: SnoozeDuration::from_minutes(value.auto_snooze),
+            auto_snooze: SnoozeDuration::from_minutes(value.preferences.snooze_policy.auto_snooze),
             payment_info: value.payment_info,
         })
     }
@@ -534,11 +802,10 @@ impl TryFrom<UserDto> for User {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PlatformIdentityDto {
     platform: String,
-    #[serde(rename = "externalId")]
     external_id: String,
-    #[serde(rename = "chatId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_id: Option<i64>,
-    #[serde(rename = "connectedAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     connected_at: DateTime<Utc>,
 }
 
@@ -567,21 +834,21 @@ impl PlatformIdentityDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserPreferencesDto {
-    #[serde(rename = "userId")]
-    user_id: i64,
-    #[serde(rename = "timePreferences")]
     time_preferences: TimePreferencesDto,
     language: String,
-    #[serde(rename = "snoozePolicy")]
     snooze_policy: SnoozePolicyDto,
-    #[serde(rename = "notificationPolicy")]
     notification_policy: NotificationPolicyDto,
+}
+
+impl Default for UserPreferencesDto {
+    fn default() -> Self {
+        Self::from(User::new(UserId::new(0)).preferences())
+    }
 }
 
 impl From<UserPreferences> for UserPreferencesDto {
     fn from(value: UserPreferences) -> Self {
         Self {
-            user_id: value.user_id.value(),
             time_preferences: TimePreferencesDto::from(value.time_preferences),
             language: language_to_str(value.language).to_string(),
             snooze_policy: SnoozePolicyDto::from(value.snooze_policy),
@@ -590,16 +857,14 @@ impl From<UserPreferences> for UserPreferencesDto {
     }
 }
 
-impl TryFrom<UserPreferencesDto> for UserPreferences {
-    type Error = ApplicationError;
-
-    fn try_from(value: UserPreferencesDto) -> Result<Self, Self::Error> {
-        Ok(Self {
-            user_id: UserId::new(value.user_id),
-            time_preferences: value.time_preferences.try_into()?,
-            language: language_from_str(&value.language),
-            snooze_policy: value.snooze_policy.into(),
-            notification_policy: value.notification_policy.into(),
+impl UserPreferencesDto {
+    fn into_domain(self, user_id: UserId) -> ApplicationResult<UserPreferences> {
+        Ok(UserPreferences {
+            user_id,
+            time_preferences: self.time_preferences.try_into()?,
+            language: language_from_str(&self.language),
+            snooze_policy: self.snooze_policy.into(),
+            notification_policy: self.notification_policy.into(),
         })
     }
 }
@@ -609,10 +874,15 @@ struct TimePreferencesDto {
     morning: String,
     afternoon: String,
     evening: String,
-    #[serde(rename = "utcOffsetSeconds")]
     utc_offset_seconds: i32,
-    #[serde(rename = "timeZone", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     time_zone: Option<String>,
+}
+
+impl Default for TimePreferencesDto {
+    fn default() -> Self {
+        Self::from(TimePreferences::default())
+    }
 }
 
 impl From<TimePreferences> for TimePreferencesDto {
@@ -648,8 +918,13 @@ impl TryFrom<TimePreferencesDto> for TimePreferences {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnoozePolicyDto {
     buttons: Vec<u32>,
-    #[serde(rename = "autoSnooze")]
     auto_snooze: u32,
+}
+
+impl Default for SnoozePolicyDto {
+    fn default() -> Self {
+        Self::from(SnoozePolicy::default())
+    }
 }
 
 impl From<SnoozePolicy> for SnoozePolicyDto {
@@ -683,6 +958,12 @@ struct NotificationPolicyDto {
     enabled: bool,
 }
 
+impl Default for NotificationPolicyDto {
+    fn default() -> Self {
+        Self::from(NotificationPolicy::default())
+    }
+}
+
 impl From<NotificationPolicy> for NotificationPolicyDto {
     fn from(value: NotificationPolicy) -> Self {
         Self {
@@ -701,22 +982,23 @@ impl From<NotificationPolicyDto> for NotificationPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskDto {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     id: Option<i64>,
-    #[serde(rename = "userId")]
     user_id: i64,
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     status: String,
     priority: String,
     #[serde(
-        rename = "dueAt",
         default,
+        skip_serializing_if = "Option::is_none",
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     due_at: Option<DateTime<Utc>>,
-    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     created_at: DateTime<Utc>,
-    #[serde(rename = "updatedAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     updated_at: DateTime<Utc>,
 }
 
@@ -755,29 +1037,28 @@ impl TryFrom<TaskDto> for Task {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReminderDto {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     id: Option<i32>,
-    #[serde(rename = "taskId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     task_id: Option<i64>,
-    #[serde(rename = "chatId")]
     chat_id: i64,
     text: String,
     schedule: ScheduleDto,
-    #[serde(rename = "nextAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     next_at: DateTime<Utc>,
     status: String,
-    #[serde(rename = "messageId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<i32>,
     #[serde(
-        rename = "snoozeUntil",
         default,
+        skip_serializing_if = "Option::is_none",
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     snooze_until: Option<DateTime<Utc>>,
-    #[serde(rename = "retryCount")]
     retry_count: u32,
     #[serde(
-        rename = "retryAt",
         default,
+        skip_serializing_if = "Option::is_none",
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     retry_at: Option<DateTime<Utc>>,
@@ -870,31 +1151,27 @@ impl TryFrom<ScheduleDto> for Schedule {
 struct TimeSpecDto {
     #[serde(rename = "type")]
     spec_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     anchor: Option<String>,
-    #[serde(rename = "offsetMinutes")]
     offset_minutes: i32,
-    #[serde(rename = "offsetHours")]
     offset_hours: i32,
-    #[serde(rename = "offsetDays")]
     offset_days: i32,
-    #[serde(rename = "offsetWeeks")]
     offset_weeks: i32,
-    #[serde(rename = "offsetMonths")]
     offset_months: i32,
-    #[serde(rename = "offsetYears")]
     offset_years: i32,
-    #[serde(rename = "offsetDirection")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     offset_direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     weekday: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     date: Option<String>,
-    #[serde(rename = "dayOfMonth")]
     day_of_month: i32,
-    #[serde(rename = "weekOfMonth")]
     week_of_month: i32,
-    #[serde(rename = "dayPosition")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     day_position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     time: Option<String>,
-    #[serde(rename = "timeOfDay")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     time_of_day: Option<String>,
 }
 
@@ -961,11 +1238,10 @@ struct RecurrenceRuleDto {
     pattern: String,
     interval: i32,
     filters: Vec<String>,
-    #[serde(rename = "intervalUnit")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     interval_unit: Option<String>,
-    #[serde(rename = "weekOfMonth")]
     week_of_month: i32,
-    #[serde(rename = "dayPosition")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     day_position: Option<String>,
 }
 
@@ -1013,20 +1289,20 @@ impl From<RecurrenceRuleDto> for RecurrenceRule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeliveryEventDto {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     id: Option<i64>,
-    #[serde(rename = "reminderId")]
     reminder_id: i32,
     channel: String,
-    #[serde(rename = "plannedAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     planned_at: DateTime<Utc>,
     #[serde(
-        rename = "sentAt",
         default,
+        skip_serializing_if = "Option::is_none",
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     sent_at: Option<DateTime<Utc>>,
     result: String,
-    #[serde(rename = "errorCode", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     error_code: Option<String>,
 }
 
@@ -1065,37 +1341,36 @@ impl TryFrom<DeliveryEventDto> for DeliveryEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SubscriptionDto {
-    id: Option<i64>,
-    #[serde(rename = "userId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_id: Option<i64>,
+    subject_type: String,
+    subject_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     user_id: Option<i64>,
-    #[serde(rename = "chatId")]
-    chat_id: i64,
     plan: String,
     source: String,
-    #[serde(rename = "isGroup")]
     is_group: bool,
-    #[serde(rename = "groupName")]
     group_name: String,
-    #[serde(rename = "ownerId", default)]
-    owner_id: Option<i64>,
-    #[serde(rename = "expiresAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_user_id: Option<i64>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     expires_at: DateTime<Utc>,
     active: bool,
-    #[serde(rename = "freeState")]
     free_state: String,
 }
 
 impl From<Subscription> for SubscriptionDto {
     fn from(value: Subscription) -> Self {
         Self {
-            id: value.id.map(SubscriptionId::value),
+            subscription_id: value.id.map(SubscriptionId::value),
+            subject_type: "chat".to_string(),
+            subject_id: value.chat_id.value(),
             user_id: value.user_id.map(UserId::value),
-            chat_id: value.chat_id.value(),
             plan: subscription_plan_to_str(value.plan).to_string(),
             source: subscription_source_to_str(value.source).to_string(),
             is_group: value.is_group,
             group_name: value.group_name,
-            owner_id: value.owner_id.map(UserId::value),
+            owner_user_id: value.owner_id.map(UserId::value),
             expires_at: value.expires_at,
             active: value.active,
             free_state: free_state_to_str(value.free_state).to_string(),
@@ -1108,11 +1383,17 @@ impl TryFrom<SubscriptionDto> for Subscription {
 
     fn try_from(value: SubscriptionDto) -> Result<Self, Self::Error> {
         let mut subscription = Subscription::new_trial(
-            ChatId::new(value.chat_id),
+            ChatId::new(value.subject_id),
             value.expires_at,
             SubscriptionPolicy { trial_days: 0 },
         );
-        if let Some(id) = value.id {
+        if value.subject_type != "chat" {
+            return Err(repo_message(format!(
+                "unsupported subscription subject type: {}",
+                value.subject_type
+            )));
+        }
+        if let Some(id) = value.subscription_id {
             subscription.assign_id(SubscriptionId::new(id));
         }
         if let Some(user_id) = value.user_id {
@@ -1122,7 +1403,7 @@ impl TryFrom<SubscriptionDto> for Subscription {
         subscription.source = subscription_source_from_str(&value.source);
         subscription.is_group = value.is_group;
         subscription.group_name = value.group_name;
-        subscription.owner_id = value.owner_id.map(UserId::new);
+        subscription.owner_id = value.owner_user_id.map(UserId::new);
         subscription.expires_at = value.expires_at;
         subscription.active = value.active;
         subscription.free_state = free_state_from_str(&value.free_state);
@@ -1132,66 +1413,132 @@ impl TryFrom<SubscriptionDto> for Subscription {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PaymentDto {
-    id: String,
-    #[serde(rename = "subscriptionId", default)]
+    #[serde(rename = "_id")]
+    payment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription_id: Option<i64>,
-    provider: String,
-    #[serde(rename = "providerPaymentId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_payment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<i64>,
     amount: i64,
     currency: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    months: Option<i32>,
     status: String,
-    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirmation_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idempotence_key: Option<String>,
+    #[serde(default)]
+    fulfilled: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    fulfilled_at: Option<DateTime<Utc>>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     created_at: DateTime<Utc>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "chrono_datetime_as_bson_datetime_optional"
+    )]
+    updated_at: Option<DateTime<Utc>>,
 }
 
-impl From<Payment> for PaymentDto {
-    fn from(value: Payment) -> Self {
+impl PaymentDto {
+    fn from_payment(value: Payment) -> Self {
         Self {
-            id: value.id.into_string(),
+            payment_id: value.id.into_string(),
             subscription_id: value.subscription_id.map(SubscriptionId::value),
-            provider: value.provider.to_string(),
+            provider: Some(value.provider.to_string()),
             provider_payment_id: value.provider_payment_id,
+            user_id: None,
             amount: value.amount.amount,
             currency: value.amount.currency.to_string(),
+            months: None,
             status: payment_status_to_str(&value.status).to_string(),
+            confirmation_url: None,
+            idempotence_key: None,
+            fulfilled: false,
+            fulfilled_at: None,
             created_at: value.created_at,
+            updated_at: None,
         }
     }
-}
 
-impl TryFrom<PaymentDto> for Payment {
-    type Error = ApplicationError;
+    fn from_transaction(value: PaymentTransaction) -> Self {
+        Self {
+            payment_id: value.payment_id.into_string(),
+            subscription_id: None,
+            provider: value.provider,
+            provider_payment_id: None,
+            user_id: Some(value.user_id.value()),
+            amount: value.amount.amount,
+            currency: value.amount.currency.to_string(),
+            months: value.months.map(|months| months.value() as i32),
+            status: payment_status_to_str(&value.status).to_string(),
+            confirmation_url: None,
+            idempotence_key: value.idempotence_key,
+            fulfilled: value.fulfilled,
+            fulfilled_at: value.fulfilled_at,
+            created_at: value.created_at,
+            updated_at: Some(value.updated_at),
+        }
+    }
 
-    fn try_from(value: PaymentDto) -> Result<Self, Self::Error> {
+    fn try_into_payment(self) -> ApplicationResult<Payment> {
         let mut payment = Payment::new(
-            PaymentId::new(value.id),
-            payment_provider_from_str(&value.provider),
-            Money::new(value.amount, currency_from_str(&value.currency))?,
-            value.created_at,
+            PaymentId::new(self.payment_id),
+            payment_provider_from_str(self.provider.as_deref().unwrap_or("yookassa")),
+            Money::new(self.amount, currency_from_str(&self.currency))?,
+            self.created_at,
         );
-        if let Some(subscription_id) = value.subscription_id {
+        if let Some(subscription_id) = self.subscription_id {
             payment.link_subscription(SubscriptionId::new(subscription_id));
         }
-        if let Some(provider_payment_id) = value.provider_payment_id {
+        if let Some(provider_payment_id) = self.provider_payment_id {
             payment.set_provider_payment_id(provider_payment_id);
         }
-        payment.update_status(payment_status_from_str(&value.status));
+        payment.update_status(payment_status_from_str(&self.status));
         Ok(payment)
+    }
+
+    fn try_into_transaction(self) -> ApplicationResult<PaymentTransaction> {
+        let user_id = self
+            .user_id
+            .ok_or_else(|| repo_message("payment transaction user_id is required"))?;
+        let months = self.months.map(Months::new).transpose()?;
+        let mut transaction = PaymentTransaction::new(
+            PaymentId::new(self.payment_id),
+            UserId::new(user_id),
+            Money::new(self.amount, currency_from_str(&self.currency))?,
+            months,
+            self.created_at,
+        );
+        transaction.status = payment_status_from_str(&self.status);
+        transaction.updated_at = self.updated_at.unwrap_or(self.created_at);
+        transaction.fulfilled = self.fulfilled;
+        transaction.fulfilled_at = self.fulfilled_at;
+        transaction.idempotence_key = self.idempotence_key;
+        transaction.provider = self.provider;
+        Ok(transaction)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReferralDto {
-    #[serde(rename = "referrerId")]
     referrer_id: i64,
-    #[serde(rename = "invitedId")]
     invited_id: i64,
-    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     created_at: DateTime<Utc>,
     #[serde(
-        rename = "rewardedAt",
         default,
+        skip_serializing_if = "Option::is_none",
         with = "chrono_datetime_as_bson_datetime_optional"
     )]
     rewarded_at: Option<DateTime<Utc>>,
@@ -1226,33 +1573,28 @@ impl TryFrom<ReferralDto> for Referral {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ExternalChannelSubscriptionDto {
-    #[serde(rename = "userId")]
-    user_id: i64,
+    subject_type: String,
+    subject_id: i64,
     platform: String,
-    #[serde(rename = "channelId")]
     channel_id: String,
-    #[serde(rename = "channelName")]
     channel_name: String,
     url: String,
-    #[serde(rename = "subNum")]
-    sub_num: i32,
-    #[serde(rename = "createdAt", with = "chrono_datetime_as_bson_datetime")]
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     created_at: DateTime<Utc>,
-    #[serde(rename = "lastContentId", default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     last_content_id: Option<String>,
-    #[serde(rename = "isLive")]
     is_live: bool,
 }
 
 impl From<ExternalChannelSubscription> for ExternalChannelSubscriptionDto {
     fn from(value: ExternalChannelSubscription) -> Self {
         Self {
-            user_id: value.user_id.value(),
+            subject_type: "user".to_string(),
+            subject_id: value.user_id.value(),
             platform: platform_to_str(value.platform).to_string(),
             channel_id: value.channel_id,
             channel_name: value.channel_name,
             url: value.url,
-            sub_num: value.sub_num,
             created_at: value.created_at,
             last_content_id: value.last_content_id,
             is_live: value.is_live,
@@ -1264,13 +1606,19 @@ impl TryFrom<ExternalChannelSubscriptionDto> for ExternalChannelSubscription {
     type Error = ApplicationError;
 
     fn try_from(value: ExternalChannelSubscriptionDto) -> Result<Self, Self::Error> {
+        if value.subject_type != "user" {
+            return Err(repo_message(format!(
+                "unsupported external channel subscription subject type: {}",
+                value.subject_type
+            )));
+        }
         let mut subscription = ExternalChannelSubscription::new(
-            UserId::new(value.user_id),
+            UserId::new(value.subject_id),
             platform_from_str(&value.platform),
             value.channel_id,
             value.channel_name,
             value.url,
-            value.sub_num,
+            0,
             value.created_at,
         );
         subscription.last_content_id = value.last_content_id;
@@ -1285,6 +1633,10 @@ fn repo_err(error: impl std::fmt::Display) -> ApplicationError {
 
 fn repo_message(message: impl Into<String>) -> ApplicationError {
     ApplicationError::Repository(message.into())
+}
+
+fn bson_datetime(value: DateTime<Utc>) -> mongodb::bson::DateTime {
+    mongodb::bson::DateTime::from_chrono(value)
 }
 
 fn generated_i64_id() -> i64 {
@@ -1703,5 +2055,67 @@ mod tests {
         assert_eq!(restored.identities.len(), 1);
         assert_eq!(restored.identities[0].user_id, user_id);
         assert_eq!(restored.identities[0].external_id, "vk-42");
+    }
+
+    #[test]
+    fn user_preferences_are_embedded_in_user_document() {
+        let user = User::new(UserId::new(42));
+
+        let document = bson::to_document(&UserDto::from(user)).unwrap();
+
+        assert!(document.contains_key("_id"));
+        assert!(document.contains_key("preferences"));
+        assert!(!document.contains_key("timePreferences"));
+        assert!(!document.contains_key("snoozeButtons"));
+        assert!(!document.contains_key("autoSnooze"));
+    }
+
+    #[test]
+    fn payment_transaction_uses_unified_payment_document() {
+        let now = Utc::now();
+        let mut transaction = PaymentTransaction::new(
+            PaymentId::new("payment-1"),
+            UserId::new(7),
+            Money::rub(195),
+            Some(Months::THREE),
+            now,
+        );
+        transaction.idempotence_key = Some("idem-1".to_string());
+        transaction.provider = Some("yookassa".to_string());
+        transaction.mark_fulfilled(now);
+
+        let dto = PaymentDto::from_transaction(transaction.clone());
+        let document = bson::to_document(&dto).unwrap();
+        let restored = dto.try_into_transaction().unwrap();
+
+        assert_eq!(document.get_str("_id").unwrap(), "payment-1");
+        assert_eq!(document.get_i64("user_id").unwrap(), 7);
+        assert_eq!(document.get_i32("months").unwrap(), 3);
+        assert!(!document.contains_key("id"));
+        assert_eq!(restored.payment_id, transaction.payment_id);
+        assert_eq!(restored.user_id, transaction.user_id);
+        assert_eq!(restored.months, transaction.months);
+        assert!(restored.fulfilled);
+    }
+
+    #[test]
+    fn external_channel_subscription_does_not_persist_display_number() {
+        let subscription = ExternalChannelSubscription::new(
+            UserId::new(7),
+            Platform::Twitch,
+            "channel",
+            "Channel",
+            "https://twitch.tv/channel",
+            9,
+            Utc::now(),
+        );
+
+        let document = bson::to_document(&ExternalChannelSubscriptionDto::from(subscription))
+            .expect("external channel subscription should serialize");
+
+        assert_eq!(document.get_str("subject_type").unwrap(), "user");
+        assert_eq!(document.get_i64("subject_id").unwrap(), 7);
+        assert!(!document.contains_key("sub_num"));
+        assert!(!document.contains_key("subNum"));
     }
 }
