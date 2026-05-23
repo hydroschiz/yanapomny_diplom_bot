@@ -21,7 +21,7 @@ use domain::{
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
-    UuidPaymentIdGenerator,
+    UuidPaymentIdGenerator, YooKassaReceiptConfig,
 };
 use presentation::keyboard::{
     channel_subs_keyboard, pay_link_keyboard, pay_provider_keyboard, reminder_confirm_keyboard,
@@ -82,10 +82,12 @@ struct BotConfig {
     yk_shop_id: Option<String>,
     yk_secret_key: Option<String>,
     yk_return_url: String,
+    yk_receipt: Option<YooKassaReceiptConfig>,
 }
 
 impl BotConfig {
     fn from_env() -> Result<Self> {
+        let yk_receipt = build_yookassa_receipt_config()?;
         Ok(Self {
             mongo_uri: required_env("MONGO_URI")?,
             mongo_db: env_or("MONGO_DB", "tgBot"),
@@ -99,6 +101,7 @@ impl BotConfig {
             yk_shop_id: optional_env("YK_SHOP_ID"),
             yk_secret_key: optional_env("YK_SECRET_KEY"),
             yk_return_url: env_or("YK_RETURN_URL", "https://vk.com/yanapomnyu"),
+            yk_receipt,
         })
     }
 
@@ -107,8 +110,33 @@ impl BotConfig {
             self.yk_shop_id.clone()?,
             self.yk_secret_key.clone()?,
             self.yk_return_url.clone(),
+            self.yk_receipt.clone(),
         ))
     }
+}
+
+fn build_yookassa_receipt_config() -> Result<Option<YooKassaReceiptConfig>> {
+    let Some(vat_code_str) = optional_env("YK_VAT_CODE") else {
+        return Ok(None);
+    };
+    let Some(vat_code) = vat_code_str.parse::<u8>().ok() else {
+        return Ok(None);
+    };
+    let payment_subject =
+        optional_env("YK_PAYMENT_SUBJECT").unwrap_or_else(|| "service".to_string());
+    let payment_mode =
+        optional_env("YK_PAYMENT_MODE").unwrap_or_else(|| "full_payment".to_string());
+    let tax_system_code = optional_env("YK_TAX_SYSTEM_CODE").and_then(|s| s.parse::<u8>().ok());
+    let email_suffix =
+        optional_env("YK_RECEIPT_EMAIL_SUFFIX").unwrap_or_else(|| "yanapomnyu.ru".to_string());
+
+    Ok(Some(YooKassaReceiptConfig::new(
+        vat_code,
+        payment_subject,
+        payment_mode,
+        tax_system_code,
+        email_suffix,
+    )))
 }
 
 #[derive(Clone)]

@@ -20,4 +20,4 @@ pub use memory::{InMemoryPendingPayment, InMemoryStore};
 pub use mongo::MongoStore;
 pub use redis::RedisPaymentCache;
 pub use twitch::TwitchGateway;
-pub use yookassa::HttpYooKassaPaymentGateway;
+pub use yookassa::{HttpYooKassaPaymentGateway, YooKassaReceiptConfig};
