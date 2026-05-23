@@ -267,6 +267,25 @@ fn renderer_keeps_html_when_transport_supports_html() {
 }
 
 #[test]
+fn renderer_renders_profile_details() {
+    let content = Renderer.render(
+        Notification::Profile {
+            user_id: 42,
+            utc_offset: "+03:00".to_string(),
+            snooze_buttons: "15 мин, 60 мин".to_string(),
+            auto_snooze: "15 мин".to_string(),
+            subscription: "активна до 01.01.2027".to_string(),
+        },
+        TransportCapabilities::unlimited(),
+    );
+
+    assert_eq!(content.format, TextFormat::Html);
+    assert!(content.text.contains("Профиль #42"));
+    assert!(content.text.contains("UTC +03:00"));
+    assert!(content.text.contains("активна до 01.01.2027"));
+}
+
+#[test]
 fn renderer_returns_transport_neutral_output_dtos() {
     let response = Renderer
         .render_response(10, Notification::Help, TransportCapabilities::vk_inline())

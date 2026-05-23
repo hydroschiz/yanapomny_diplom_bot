@@ -94,8 +94,12 @@ pub enum Notification {
         expiry: Option<String>,
     },
     PaymentDisabled,
-    ProfilePlaceholder {
+    Profile {
         user_id: i64,
+        utc_offset: String,
+        snooze_buttons: String,
+        auto_snooze: String,
+        subscription: String,
     },
     PlainText {
         text: String,
@@ -111,8 +115,12 @@ impl From<ApplicationNotification> for Notification {
                 text,
                 keyboard: None,
             },
-            ApplicationNotification::Profile(profile) => Self::ProfilePlaceholder {
+            ApplicationNotification::Profile(profile) => Self::Profile {
                 user_id: profile.user_id.value(),
+                utc_offset: "не загружен".to_string(),
+                snooze_buttons: "не загружены".to_string(),
+                auto_snooze: "не загружено".to_string(),
+                subscription: "не загружена".to_string(),
             },
         }
     }
@@ -187,8 +195,20 @@ impl Renderer {
                 None,
                 capabilities,
             ),
-            Notification::ProfilePlaceholder { user_id } => self.message(
-                format!("👤 Профиль #{}", user_id),
+            Notification::Profile {
+                user_id,
+                utc_offset,
+                snooze_buttons,
+                auto_snooze,
+                subscription,
+            } => self.message(
+                format_profile(
+                    user_id,
+                    &utc_offset,
+                    &snooze_buttons,
+                    &auto_snooze,
+                    &subscription,
+                ),
                 Some(profile_keyboard(capabilities)),
                 capabilities,
             ),
@@ -256,6 +276,24 @@ pub fn format_subscription_status(is_active: bool, expiry: Option<&str>) -> Stri
          📧 <b>Статус:</b> {}{}\n\n\
          <i>Совет:</i> <b>выбирайте более длительную подписку</b>, чтобы снизить стоимость одного месяца.",
         status, expiry_line
+    )
+}
+
+fn format_profile(
+    user_id: i64,
+    utc_offset: &str,
+    snooze_buttons: &str,
+    auto_snooze: &str,
+    subscription: &str,
+) -> String {
+    format!(
+        "👤 <b>Профиль #{}</b>\n\n\
+         💎 <b>Подписка:</b> {}\n\
+         🌍 <b>Часовой пояс:</b> UTC {}\n\
+         ⏰ <b>Кнопки откладывания:</b> {}\n\
+         🔁 <b>Автооткладывание:</b> {}\n\n\
+         Используйте кнопки ниже, чтобы открыть нужный раздел.",
+        user_id, subscription, utc_offset, snooze_buttons, auto_snooze
     )
 }
 

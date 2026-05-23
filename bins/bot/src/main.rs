@@ -8,15 +8,15 @@ use application::{
     DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
     ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase, ListTasksUseCase,
-    ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
+    ProfileView, ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase, SubscriptionRepository,
 };
 use async_trait::async_trait;
 use domain::{
     tariff_for_months, ChatId, ExternalChannelSubscription, Months, PaymentId, PaymentStatus,
-    Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy, Task,
-    TimePreferences, UserId,
+    Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy,
+    SubscriptionStatus, Task, TimePreferences, UserId,
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
@@ -265,18 +265,7 @@ impl BotHandler {
                     .await
             }
             MessageRoute::ShowPay => self.show_payment_menu(message.peer_id).await,
-            MessageRoute::ShowProfile => {
-                let profile = GetProfileUseCase::new(&self.store, &self.store, &self.clock)
-                    .execute(UserId::new(message.user_id), ChatId::new(message.peer_id))
-                    .await?;
-                self.send_notification(
-                    message.peer_id,
-                    Notification::ProfilePlaceholder {
-                        user_id: profile.user.id.value(),
-                    },
-                )
-                .await
-            }
+            MessageRoute::ShowProfile => self.show_profile(message.peer_id, message.user_id).await,
             MessageRoute::CreateReminderFromCommand(text)
             | MessageRoute::ReminderText(text)
             | MessageRoute::GroupReminderText(text) => {
@@ -408,13 +397,7 @@ impl BotHandler {
                 self.send_text(callback.peer_id, "Оплата отменена.").await
             }
             CallbackRoute::ShowProfile => {
-                self.send_notification(
-                    callback.peer_id,
-                    Notification::ProfilePlaceholder {
-                        user_id: callback.user_id,
-                    },
-                )
-                .await
+                self.show_profile(callback.peer_id, callback.user_id).await
             }
             CallbackRoute::ListReminders => {
                 self.show_active_tasks(callback.peer_id, callback.user_id)
@@ -481,6 +464,14 @@ impl BotHandler {
             .map(|subscription| subscription.expires_at.format("%d.%m.%Y").to_string());
 
         self.send_notification(peer_id, Notification::PayMenu { is_active, expiry })
+            .await
+    }
+
+    async fn show_profile(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let profile = GetProfileUseCase::new(&self.store, &self.store, &self.clock)
+            .execute(UserId::new(user_id), ChatId::new(peer_id))
+            .await?;
+        self.send_notification(peer_id, profile_notification(profile))
             .await
     }
 
@@ -1018,6 +1009,41 @@ fn channel_platform(platform: ChannelPlatform) -> Platform {
 fn supported_tariff(months: i32) -> Option<domain::Tariff> {
     let months = Months::new(months).ok()?;
     tariff_for_months(months).copied()
+}
+
+fn profile_notification(profile: ProfileView) -> Notification {
+    let ProfileView {
+        user,
+        subscription_status,
+    } = profile;
+    Notification::Profile {
+        user_id: user.id.value(),
+        utc_offset: user.time_preferences.utc_offset.to_string(),
+        snooze_buttons: format_profile_snooze_buttons(&user.snooze_buttons),
+        auto_snooze: format!("{} мин", user.auto_snooze.minutes()),
+        subscription: format_profile_subscription(subscription_status),
+    }
+}
+
+fn format_profile_snooze_buttons(buttons: &[SnoozeDuration]) -> String {
+    if buttons.is_empty() {
+        "не настроены".to_string()
+    } else {
+        format_snooze_buttons(buttons)
+    }
+}
+
+fn format_profile_subscription(status: Option<SubscriptionStatus>) -> String {
+    match status {
+        Some(SubscriptionStatus::Trial { until }) => {
+            format!("пробный период до {}", until.format("%d.%m.%Y"))
+        }
+        Some(SubscriptionStatus::Active { until }) => {
+            format!("активна до {}", until.format("%d.%m.%Y"))
+        }
+        Some(SubscriptionStatus::Expired) => "не активна".to_string(),
+        None => "не оформлена".to_string(),
+    }
 }
 
 fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {
