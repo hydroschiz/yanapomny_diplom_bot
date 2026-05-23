@@ -370,13 +370,13 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .confirmation_url
         .contains(subscription_payment.transaction.payment_id.as_str()));
 
-    let pending = CheckSubscriptionPaymentUseCase::new(&store, &store, &store)
+    let pending = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
         .execute(&subscription_payment.transaction.payment_id)
         .await
         .unwrap();
     assert!(pending.subscription.is_none());
 
-    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::new(&store, &store, &store)
+    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
         .execute(
             &subscription_payment.transaction.payment_id,
             PaymentStatus::Succeeded,
@@ -389,7 +389,7 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
     assert_eq!(subscription.chat_id, ChatId::new(user_id.value()));
     assert!(subscription.expires_at > fixed_now());
 
-    let fulfilled_again = CheckSubscriptionPaymentUseCase::new(&store, &store, &store)
+    let fulfilled_again = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
         .execute(&subscription_payment.transaction.payment_id)
         .await
         .unwrap();
@@ -858,6 +858,14 @@ impl PaymentGatewayPort for AppMemory {
         transaction: &PaymentTransaction,
     ) -> application::ApplicationResult<String> {
         Ok(format!("https://pay.example/{}", transaction.payment_id))
+    }
+
+    async fn get_payment_status(
+        &self,
+        payment_id: &PaymentId,
+    ) -> application::ApplicationResult<PaymentStatus> {
+        let _ = payment_id;
+        Ok(PaymentStatus::Pending)
     }
 }
 

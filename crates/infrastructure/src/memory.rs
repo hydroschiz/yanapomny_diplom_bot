@@ -10,8 +10,8 @@ use application::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    ChannelSubscription, ChatId, PaymentId, PaymentTransaction, Referral, Reminder, ReminderId,
-    Schedule, Subscription, TimePreferences, User, UserId,
+    ChannelSubscription, ChatId, PaymentId, PaymentStatus, PaymentTransaction, Referral, Reminder,
+    ReminderId, Schedule, Subscription, TimePreferences, User, UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +339,12 @@ impl PaymentGatewayPort for InMemoryStore {
             .entry(transaction.payment_id.clone())
             .or_insert_with(|| format!("https://pay.example/{}", transaction.payment_id));
         Ok(url.clone())
+    }
+
+    async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus> {
+        // For in-memory store, always return Pending (test stubs don't have real payments)
+        let _ = payment_id;
+        Ok(PaymentStatus::Pending)
     }
 }
 

@@ -612,19 +612,23 @@ impl BotHandler {
                 .await;
         }
         let payment_id = PaymentId::new(payment_id);
-        let status =
-            match CheckSubscriptionPaymentUseCase::new(&self.store, &self.store, &self.clock)
-                .execute(&payment_id)
-                .await
-            {
-                Ok(status) => status,
-                Err(ApplicationError::NotFound { .. }) => {
-                    return self
-                        .send_text(peer_id, "Платёж не найден. Оформите новый платёж.")
-                        .await;
-                }
-                Err(error) => return Err(error.into()),
-            };
+        let status = match CheckSubscriptionPaymentUseCase::new(
+            &self.store,
+            self.payment_gateway.as_ref(),
+            &self.store,
+            &self.clock,
+        )
+        .execute(&payment_id)
+        .await
+        {
+            Ok(status) => status,
+            Err(ApplicationError::NotFound { .. }) => {
+                return self
+                    .send_text(peer_id, "Платёж не найден. Оформите новый платёж.")
+                    .await;
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         let text = match &status.transaction.status {
             PaymentStatus::Succeeded => {

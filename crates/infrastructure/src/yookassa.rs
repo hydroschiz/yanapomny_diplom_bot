@@ -1,6 +1,6 @@
 use application::{ApplicationError, ApplicationResult, PaymentGateway, PaymentGatewayPort};
 use async_trait::async_trait;
-use domain::{Currency, Money, Payment, PaymentTransaction, UserId};
+use domain::{Currency, Money, Payment, PaymentId, PaymentStatus, PaymentTransaction, UserId};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -197,6 +197,33 @@ impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
         )
         .await
     }
+
+    async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus> {
+        let url = format!("{}/{}", YOOKASSA_CREATE_PAYMENT_URL, payment_id.as_str());
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.shop_id, Some(&self.secret_key))
+            .header("Idempotence-Key", payment_id.as_str())
+            .send()
+            .await
+            .map_err(|err| ApplicationError::ExternalService(err.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApplicationError::ExternalService(format!(
+                "YooKassa get payment failed: {status} {body}"
+            )));
+        }
+
+        let response: PaymentStatusResponse = response
+            .json()
+            .await
+            .map_err(|err| ApplicationError::ExternalService(err.to_string()))?;
+
+        Ok(payment_status_from_str(response.status.as_str()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,9 +236,24 @@ struct ConfirmationResponse {
     confirmation_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PaymentStatusResponse {
+    status: String,
+}
+
 fn currency_code(value: Currency) -> &'static str {
     match value {
         Currency::Rub => "RUB",
+    }
+}
+
+fn payment_status_from_str(status: &str) -> PaymentStatus {
+    match status {
+        "succeeded" => PaymentStatus::Succeeded,
+        "pending" => PaymentStatus::Pending,
+        "waiting_for_capture" => PaymentStatus::WaitingForCapture,
+        "canceled" => PaymentStatus::Canceled,
+        _ => PaymentStatus::Unknown(status.to_string()),
     }
 }
 

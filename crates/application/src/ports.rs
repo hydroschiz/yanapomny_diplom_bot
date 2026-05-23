@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
     ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Payment, PaymentId,
-    PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription, Task, TaskId,
-    TimePreferences, User, UserId, UserPreferences,
+    PaymentStatus, PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription,
+    Task, TaskId, TimePreferences, User, UserId, UserPreferences,
 };
 
 use crate::ApplicationResult;
@@ -145,6 +145,7 @@ pub trait PaymentCachePort: Send + Sync {
 #[async_trait]
 pub trait PaymentGatewayPort: Send + Sync {
     async fn create_payment(&self, transaction: &PaymentTransaction) -> ApplicationResult<String>;
+    async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus>;
 }
 
 #[async_trait]

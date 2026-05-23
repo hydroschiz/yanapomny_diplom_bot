@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use application::ProcessSubscriptionPaymentWebhookUseCase;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use domain::{PaymentId, PaymentStatus};
-use infrastructure::{MongoStore, SystemClock};
+use infrastructure::{HttpYooKassaPaymentGateway, MongoStore, SystemClock};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -65,8 +65,12 @@ async fn yookassa_webhook(
         metadata_string(&payload.object.metadata, "payment_id").unwrap_or(payload.object.id);
     let status = yookassa_status(&payload.object.status, &payload.event);
     let payment_id = PaymentId::new(payment_id);
-    let use_case =
-        ProcessSubscriptionPaymentWebhookUseCase::new(&state.store, &state.store, &state.clock);
+    let use_case = ProcessSubscriptionPaymentWebhookUseCase::<
+        MongoStore,
+        HttpYooKassaPaymentGateway,
+        _,
+        _,
+    >::new(&state.store, None, &state.store, &state.clock);
 
     match use_case.execute(&payment_id, status).await {
         Ok(payment) => {

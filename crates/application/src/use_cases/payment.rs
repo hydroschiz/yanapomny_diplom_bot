@@ -175,21 +175,29 @@ pub struct SubscriptionPaymentStatus {
     pub subscription: Option<Subscription>,
 }
 
-pub struct CheckSubscriptionPaymentUseCase<'a, T, S, C> {
+pub struct CheckSubscriptionPaymentUseCase<'a, T, G, S, C> {
     transactions: &'a T,
+    gateway: Option<&'a G>,
     subscriptions: &'a S,
     clock: &'a C,
 }
 
-impl<'a, T, S, C> CheckSubscriptionPaymentUseCase<'a, T, S, C>
+impl<'a, T, G, S, C> CheckSubscriptionPaymentUseCase<'a, T, G, S, C>
 where
     T: PaymentTransactionRepository,
+    G: PaymentGatewayPort,
     S: SubscriptionRepository,
     C: Clock,
 {
-    pub const fn new(transactions: &'a T, subscriptions: &'a S, clock: &'a C) -> Self {
+    pub const fn new(
+        transactions: &'a T,
+        gateway: Option<&'a G>,
+        subscriptions: &'a S,
+        clock: &'a C,
+    ) -> Self {
         Self {
             transactions,
+            gateway,
             subscriptions,
             clock,
         }
@@ -199,7 +207,22 @@ where
         &self,
         payment_id: &PaymentId,
     ) -> ApplicationResult<SubscriptionPaymentStatus> {
-        let transaction = self.load_transaction(payment_id).await?;
+        let mut transaction = self.load_transaction(payment_id).await?;
+
+        // If transaction is not yet succeeded, check with payment gateway
+        if transaction.status != PaymentStatus::Succeeded {
+            if let Some(gateway) = self.gateway {
+                let gateway_status = gateway.get_payment_status(payment_id).await?;
+                if gateway_status == PaymentStatus::Succeeded {
+                    let now = self.clock.now();
+                    transaction.update_status(gateway_status, now);
+                    self.transactions
+                        .save_payment_transaction(&transaction)
+                        .await?;
+                }
+            }
+        }
+
         self.fulfill_if_succeeded(transaction).await
     }
 
@@ -256,21 +279,29 @@ where
     }
 }
 
-pub struct ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, C> {
+pub struct ProcessSubscriptionPaymentWebhookUseCase<'a, T, G, S, C> {
     transactions: &'a T,
+    gateway: Option<&'a G>,
     subscriptions: &'a S,
     clock: &'a C,
 }
 
-impl<'a, T, S, C> ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, C>
+impl<'a, T, G, S, C> ProcessSubscriptionPaymentWebhookUseCase<'a, T, G, S, C>
 where
     T: PaymentTransactionRepository,
+    G: PaymentGatewayPort,
     S: SubscriptionRepository,
     C: Clock,
 {
-    pub const fn new(transactions: &'a T, subscriptions: &'a S, clock: &'a C) -> Self {
+    pub const fn new(
+        transactions: &'a T,
+        gateway: Option<&'a G>,
+        subscriptions: &'a S,
+        clock: &'a C,
+    ) -> Self {
         Self {
             transactions,
+            gateway,
             subscriptions,
             clock,
         }
@@ -293,8 +324,13 @@ where
         self.transactions
             .save_payment_transaction(&transaction)
             .await?;
-        CheckSubscriptionPaymentUseCase::new(self.transactions, self.subscriptions, self.clock)
-            .fulfill_if_succeeded(transaction)
-            .await
+        CheckSubscriptionPaymentUseCase::new(
+            self.transactions,
+            self.gateway,
+            self.subscriptions,
+            self.clock,
+        )
+        .fulfill_if_succeeded(transaction)
+        .await
     }
 }
