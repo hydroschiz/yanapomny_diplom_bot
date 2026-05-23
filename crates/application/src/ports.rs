@@ -184,6 +184,17 @@ pub enum DialogState {
     AwaitingUtc,
     AwaitingSnoozeButtons,
     AwaitingAutoSnooze,
+    AwaitingTextConfirmation {
+        text: String,
+    },
+    AwaitingReminderConfirmation {
+        original_text: String,
+        interpreted: InterpretedTask,
+    },
+    AwaitingReminderEdit {
+        original_text: String,
+        interpreted: InterpretedTask,
+    },
     AwaitingReminderDeletion,
     AwaitingChannelSubscriptionDeletion,
 }

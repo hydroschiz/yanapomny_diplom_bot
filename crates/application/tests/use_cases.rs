@@ -4,15 +4,16 @@ use application::{
     active_tasks, CancelReminderUseCase, CheckSubscriptionPaymentUseCase,
     CheckTwitchStreamsUseCase, Clock, CompleteReminderUseCase, CompleteTaskUseCase,
     ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
-    CreateReferralUseCase, CreateReminderCommand, CreateReminderFromTextCommand,
-    CreateReminderFromTextUseCase, CreateReminderUseCase, CreateSubscriptionPaymentCommand,
-    CreateSubscriptionPaymentUseCase, CreateTaskFromTextUseCase,
-    DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
-    DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
-    ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
-    ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
+    CreateReferralUseCase, CreateReminderCommand, CreateReminderFromPreviewCommand,
+    CreateReminderFromPreviewUseCase, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    CreateReminderUseCase, CreateSubscriptionPaymentCommand, CreateSubscriptionPaymentUseCase,
+    CreateTaskFromTextUseCase, DeleteExternalChannelSubscriptionCommand,
+    DeleteExternalChannelSubscriptionUseCase, DeliverDueRemindersUseCase, DeliveryEventRepository,
+    DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, IdGenerator,
+    InterpretedTask, ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
     NaturalLanguageInterpreter, Notification, Notifier, PaymentCachePort, PaymentGateway,
     PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
+    PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase,
     ProcessSubscriptionPaymentWebhookUseCase, ReferralRepository, ReminderActionCommand,
     ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
@@ -100,6 +101,49 @@ async fn reminder_from_text_use_case_creates_user_task_and_reminder() {
     assert_eq!(created.reminder.text, "зарядка");
     assert_eq!(created.reminder.schedule, schedule);
     assert_eq!(created.reminder.next_at, fixed_now() + Duration::hours(2));
+}
+
+#[tokio::test]
+async fn reminder_preview_flow_does_not_create_until_confirmed() {
+    let store = AppMemory::new(fixed_now());
+    let user_id = UserId::new(9);
+    let chat_id = ChatId::new(99);
+    let interpreted = InterpretedTask {
+        title: "чай".to_string(),
+        description: Some("из LLM".to_string()),
+        schedule: Schedule::OneTime(TimeSpec::default()),
+        trigger_at: fixed_now() + Duration::minutes(30),
+    };
+    store.set_interpretation(user_id, "через 30 минут чай", interpreted.clone());
+
+    let preview = PreviewReminderFromTextUseCase::new(&store, &store)
+        .execute(PreviewReminderFromTextCommand {
+            user_id,
+            text: "через 30 минут чай".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(preview.original_text, "через 30 минут чай");
+    assert_eq!(preview.interpreted, interpreted);
+    assert!(store.list_tasks(user_id).await.unwrap().is_empty());
+    assert!(store.list_reminders(chat_id).await.unwrap().is_empty());
+
+    let created = CreateReminderFromPreviewUseCase::new(&store, &store, &store)
+        .execute(CreateReminderFromPreviewCommand {
+            user_id,
+            chat_id,
+            interpreted: preview.interpreted,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(created.task.title, "чай");
+    assert_eq!(created.reminder.text, "чай");
+    assert_eq!(
+        created.reminder.next_at,
+        fixed_now() + Duration::minutes(30)
+    );
 }
 
 #[tokio::test]

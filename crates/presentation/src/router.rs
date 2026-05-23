@@ -52,6 +52,9 @@ impl From<DialogState> for ConversationState {
             DialogState::AwaitingUtc => Self::AwaitingUtc,
             DialogState::AwaitingSnoozeButtons => Self::AwaitingSnoozeButtons,
             DialogState::AwaitingAutoSnooze => Self::AwaitingAutoSnooze,
+            DialogState::AwaitingTextConfirmation { .. } => Self::AwaitingTextConfirmation,
+            DialogState::AwaitingReminderConfirmation { .. } => Self::AwaitingReminderConfirmation,
+            DialogState::AwaitingReminderEdit { .. } => Self::AwaitingReminderEdit,
             DialogState::AwaitingReminderDeletion => Self::AwaitingReminderDeletion,
             DialogState::AwaitingChannelSubscriptionDeletion => Self::AwaitingSubDeleteNum,
         }

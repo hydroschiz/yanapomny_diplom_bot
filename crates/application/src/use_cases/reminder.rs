@@ -5,7 +5,7 @@ use domain::{
 };
 
 use crate::{
-    ApplicationError, ApplicationResult, Clock, DeliveryEventRepository,
+    ApplicationError, ApplicationResult, Clock, DeliveryEventRepository, InterpretedTask,
     NaturalLanguageInterpreter, Notification, Notifier, ReminderPreferencesRepository,
     ReminderRepository, TaskRepository, UserRepository,
 };
@@ -58,6 +58,91 @@ pub struct CreatedReminderFromText {
     pub reminder: Reminder,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewReminderFromTextCommand {
+    pub user_id: UserId,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewedReminderFromText {
+    pub original_text: String,
+    pub interpreted: InterpretedTask,
+}
+
+pub struct PreviewReminderFromTextUseCase<'a, U, I> {
+    users: &'a U,
+    interpreter: &'a I,
+}
+
+impl<'a, U, I> PreviewReminderFromTextUseCase<'a, U, I>
+where
+    U: UserRepository,
+    I: NaturalLanguageInterpreter,
+{
+    pub const fn new(users: &'a U, interpreter: &'a I) -> Self {
+        Self { users, interpreter }
+    }
+
+    pub async fn execute(
+        &self,
+        command: PreviewReminderFromTextCommand,
+    ) -> ApplicationResult<PreviewedReminderFromText> {
+        let user = ensure_user(self.users, command.user_id).await?;
+        let interpreted = self
+            .interpreter
+            .interpret_task(&command.text, &user)
+            .await?;
+        Ok(PreviewedReminderFromText {
+            original_text: command.text,
+            interpreted,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateReminderFromPreviewCommand {
+    pub user_id: UserId,
+    pub chat_id: ChatId,
+    pub interpreted: InterpretedTask,
+}
+
+pub struct CreateReminderFromPreviewUseCase<'a, T, R, C> {
+    tasks: &'a T,
+    reminders: &'a R,
+    clock: &'a C,
+}
+
+impl<'a, T, R, C> CreateReminderFromPreviewUseCase<'a, T, R, C>
+where
+    T: TaskRepository,
+    R: ReminderRepository,
+    C: Clock,
+{
+    pub const fn new(tasks: &'a T, reminders: &'a R, clock: &'a C) -> Self {
+        Self {
+            tasks,
+            reminders,
+            clock,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        command: CreateReminderFromPreviewCommand,
+    ) -> ApplicationResult<CreatedReminderFromText> {
+        create_interpreted_reminder(
+            self.tasks,
+            self.reminders,
+            self.clock,
+            command.user_id,
+            command.chat_id,
+            command.interpreted,
+        )
+        .await
+    }
+}
+
 pub struct CreateReminderFromTextUseCase<'a, U, T, R, I, C> {
     users: &'a U,
     tasks: &'a T,
@@ -99,25 +184,15 @@ where
             .interpreter
             .interpret_task(&command.text, &user)
             .await?;
-        let now = self.clock.now();
-        let mut task = Task::new(command.user_id, interpreted.title.clone(), now);
-        task.description = interpreted.description;
-        task.priority = TaskPriority::Normal;
-        task.due_at = Some(interpreted.trigger_at);
-        let task = self.tasks.create_task(task).await?;
-
-        let mut reminder = Reminder::new(
+        create_interpreted_reminder(
+            self.tasks,
+            self.reminders,
+            self.clock,
+            command.user_id,
             command.chat_id,
-            interpreted.title,
-            interpreted.schedule,
-            interpreted.trigger_at,
-        );
-        if let Some(task_id) = task.id {
-            reminder.attach_task(task_id);
-        }
-        let reminder = self.reminders.create_reminder(reminder).await?;
-
-        Ok(CreatedReminderFromText { task, reminder })
+            interpreted,
+        )
+        .await
     }
 
     async fn ensure_user(&self, user_id: UserId) -> ApplicationResult<User> {
@@ -129,6 +204,53 @@ where
         self.users.save_user(&user).await?;
         Ok(user)
     }
+}
+
+async fn ensure_user<R>(users: &R, user_id: UserId) -> ApplicationResult<User>
+where
+    R: UserRepository,
+{
+    if let Some(user) = users.find_user(user_id).await? {
+        return Ok(user);
+    }
+
+    let user = User::new(user_id);
+    users.save_user(&user).await?;
+    Ok(user)
+}
+
+async fn create_interpreted_reminder<T, R, C>(
+    tasks: &T,
+    reminders: &R,
+    clock: &C,
+    user_id: UserId,
+    chat_id: ChatId,
+    interpreted: InterpretedTask,
+) -> ApplicationResult<CreatedReminderFromText>
+where
+    T: TaskRepository,
+    R: ReminderRepository,
+    C: Clock,
+{
+    let now = clock.now();
+    let mut task = Task::new(user_id, interpreted.title.clone(), now);
+    task.description = interpreted.description;
+    task.priority = TaskPriority::Normal;
+    task.due_at = Some(interpreted.trigger_at);
+    let task = tasks.create_task(task).await?;
+
+    let mut reminder = Reminder::new(
+        chat_id,
+        interpreted.title,
+        interpreted.schedule,
+        interpreted.trigger_at,
+    );
+    if let Some(task_id) = task.id {
+        reminder.attach_task(task_id);
+    }
+    let reminder = reminders.create_reminder(reminder).await?;
+
+    Ok(CreatedReminderFromText { task, reminder })
 }
 
 pub struct SnoozeReminderUseCase<'a, R, C> {

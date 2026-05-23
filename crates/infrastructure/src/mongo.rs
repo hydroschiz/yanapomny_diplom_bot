@@ -1,9 +1,9 @@
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
-    DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, PaymentRepository,
-    PaymentTransactionRepository, ReferralRepository, ReminderPreferencesRepository,
-    ReminderRepository, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
-    UserRepository,
+    DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, InterpretedTask,
+    PaymentRepository, PaymentTransactionRepository, ReferralRepository,
+    ReminderPreferencesRepository, ReminderRepository, SubscriptionRepository, TaskRepository,
+    UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -276,16 +276,13 @@ impl DialogStateStore for MongoStore {
             .await
             .map_err(repo_err)?;
 
-        Ok(dto
-            .map(|state| dialog_state_from_str(&state.state))
-            .unwrap_or(DialogState::Idle))
+        dto.map(dialog_state_from_dto)
+            .transpose()
+            .map(|state| state.unwrap_or(DialogState::Idle))
     }
 
     async fn set_state(&self, user_id: UserId, state: DialogState) -> ApplicationResult<()> {
-        let dto = DialogStateDto {
-            user_id: user_id.value(),
-            state: dialog_state_to_str(&state).to_string(),
-        };
+        let dto = DialogStateDto::from_state(user_id, state);
         self.dialog_states()
             .replace_one(
                 doc! { "_id": dto.user_id },
@@ -833,6 +830,78 @@ struct DialogStateDto {
     #[serde(rename = "_id")]
     user_id: i64,
     state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<PendingReminderDto>,
+}
+
+impl DialogStateDto {
+    fn from_state(user_id: UserId, state: DialogState) -> Self {
+        let mut dto = Self {
+            user_id: user_id.value(),
+            state: dialog_state_to_str(&state).to_string(),
+            text: None,
+            pending: None,
+        };
+
+        match state {
+            DialogState::AwaitingTextConfirmation { text } => dto.text = Some(text),
+            DialogState::AwaitingReminderConfirmation {
+                original_text,
+                interpreted,
+            }
+            | DialogState::AwaitingReminderEdit {
+                original_text,
+                interpreted,
+            } => {
+                dto.pending = Some(PendingReminderDto::from_pending(original_text, interpreted));
+            }
+            DialogState::Idle
+            | DialogState::AwaitingUtc
+            | DialogState::AwaitingSnoozeButtons
+            | DialogState::AwaitingAutoSnooze
+            | DialogState::AwaitingReminderDeletion
+            | DialogState::AwaitingChannelSubscriptionDeletion => {}
+        }
+
+        dto
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingReminderDto {
+    original_text: String,
+    title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    schedule: ScheduleDto,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    trigger_at: DateTime<Utc>,
+}
+
+impl PendingReminderDto {
+    fn from_pending(original_text: String, interpreted: InterpretedTask) -> Self {
+        Self {
+            original_text,
+            title: interpreted.title,
+            description: interpreted.description,
+            schedule: ScheduleDto::from(interpreted.schedule),
+            trigger_at: interpreted.trigger_at,
+        }
+    }
+
+    fn into_parts(self) -> ApplicationResult<(String, InterpretedTask)> {
+        Ok((
+            self.original_text,
+            InterpretedTask {
+                title: self.title,
+                description: self.description,
+                schedule: self.schedule.try_into()?,
+                trigger_at: self.trigger_at,
+            },
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2106,6 +2175,9 @@ fn dialog_state_to_str(value: &DialogState) -> &'static str {
         DialogState::AwaitingUtc => "awaiting_utc",
         DialogState::AwaitingSnoozeButtons => "awaiting_snooze_buttons",
         DialogState::AwaitingAutoSnooze => "awaiting_auto_snooze",
+        DialogState::AwaitingTextConfirmation { .. } => "awaiting_text_confirmation",
+        DialogState::AwaitingReminderConfirmation { .. } => "awaiting_reminder_confirmation",
+        DialogState::AwaitingReminderEdit { .. } => "awaiting_reminder_edit",
         DialogState::AwaitingReminderDeletion => "awaiting_reminder_deletion",
         DialogState::AwaitingChannelSubscriptionDeletion => {
             "awaiting_channel_subscription_deletion"
@@ -2113,16 +2185,48 @@ fn dialog_state_to_str(value: &DialogState) -> &'static str {
     }
 }
 
-fn dialog_state_from_str(value: &str) -> DialogState {
-    match value {
-        "awaiting_utc" => DialogState::AwaitingUtc,
-        "awaiting_snooze_buttons" => DialogState::AwaitingSnoozeButtons,
-        "awaiting_auto_snooze" => DialogState::AwaitingAutoSnooze,
-        "awaiting_reminder_deletion" => DialogState::AwaitingReminderDeletion,
+fn dialog_state_from_dto(value: DialogStateDto) -> ApplicationResult<DialogState> {
+    match value.state.as_str() {
+        "awaiting_utc" => Ok(DialogState::AwaitingUtc),
+        "awaiting_snooze_buttons" => Ok(DialogState::AwaitingSnoozeButtons),
+        "awaiting_auto_snooze" => Ok(DialogState::AwaitingAutoSnooze),
+        "awaiting_text_confirmation" => Ok(value
+            .text
+            .map(|text| DialogState::AwaitingTextConfirmation { text })
+            .unwrap_or(DialogState::Idle)),
+        "awaiting_reminder_confirmation" => value
+            .pending
+            .map(PendingReminderDto::into_parts)
+            .transpose()
+            .map(|pending| {
+                pending
+                    .map(
+                        |(original_text, interpreted)| DialogState::AwaitingReminderConfirmation {
+                            original_text,
+                            interpreted,
+                        },
+                    )
+                    .unwrap_or(DialogState::Idle)
+            }),
+        "awaiting_reminder_edit" => value
+            .pending
+            .map(PendingReminderDto::into_parts)
+            .transpose()
+            .map(|pending| {
+                pending
+                    .map(
+                        |(original_text, interpreted)| DialogState::AwaitingReminderEdit {
+                            original_text,
+                            interpreted,
+                        },
+                    )
+                    .unwrap_or(DialogState::Idle)
+            }),
+        "awaiting_reminder_deletion" => Ok(DialogState::AwaitingReminderDeletion),
         "awaiting_channel_subscription_deletion" => {
-            DialogState::AwaitingChannelSubscriptionDeletion
+            Ok(DialogState::AwaitingChannelSubscriptionDeletion)
         }
-        _ => DialogState::Idle,
+        _ => Ok(DialogState::Idle),
     }
 }
 
@@ -2250,10 +2354,7 @@ mod tests {
 
     #[test]
     fn dialog_state_dto_uses_user_id_as_document_id() {
-        let dto = DialogStateDto {
-            user_id: 7,
-            state: dialog_state_to_str(&DialogState::AwaitingAutoSnooze).to_string(),
-        };
+        let dto = DialogStateDto::from_state(UserId::new(7), DialogState::AwaitingAutoSnooze);
 
         let document = bson::to_document(&dto).expect("dialog state should serialize");
 
@@ -2261,9 +2362,43 @@ mod tests {
         assert_eq!(document.get_str("state").unwrap(), "awaiting_auto_snooze");
         assert!(!document.contains_key("user_id"));
         assert_eq!(
-            dialog_state_from_str(document.get_str("state").unwrap()),
+            dialog_state_from_dto(dto).unwrap(),
             DialogState::AwaitingAutoSnooze
         );
-        assert_eq!(dialog_state_from_str("unknown"), DialogState::Idle);
+        assert_eq!(
+            dialog_state_from_dto(DialogStateDto {
+                user_id: 7,
+                state: "unknown".to_string(),
+                text: None,
+                pending: None,
+            })
+            .unwrap(),
+            DialogState::Idle
+        );
+    }
+
+    #[test]
+    fn dialog_state_dto_roundtrips_pending_reminder_confirmation() {
+        let now = Utc::now();
+        let state = DialogState::AwaitingReminderConfirmation {
+            original_text: "через час чай".to_string(),
+            interpreted: InterpretedTask {
+                title: "чай".to_string(),
+                description: Some("попить чай".to_string()),
+                schedule: Schedule::OneTime(TimeSpec::default()),
+                trigger_at: now,
+            },
+        };
+
+        let dto = DialogStateDto::from_state(UserId::new(7), state.clone());
+        let document = bson::to_document(&dto).expect("dialog state should serialize");
+        let restored = dialog_state_from_dto(dto).unwrap();
+
+        assert_eq!(
+            document.get_str("state").unwrap(),
+            "awaiting_reminder_confirmation"
+        );
+        assert!(document.contains_key("pending"));
+        assert_eq!(restored, state);
     }
 }

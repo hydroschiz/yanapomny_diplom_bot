@@ -3,12 +3,13 @@ use std::cmp::Ordering;
 use anyhow::{Context, Result};
 use application::{
     active_tasks, ApplicationError, CancelReminderUseCase, CheckSubscriptionPaymentUseCase, Clock,
-    CompleteReminderUseCase, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    CompleteReminderUseCase, CreateReminderFromPreviewCommand, CreateReminderFromPreviewUseCase,
     CreateSubscriptionPaymentCommand, CreateSubscriptionPaymentUseCase,
     DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
-    ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase, ListTasksUseCase,
-    ProfileView, ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
+    InterpretedTask, ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
+    ListTasksUseCase, PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase, ProfileView,
+    ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
     SetUserTimezoneUseCase, SnoozeReminderUseCase, SubscriptionRepository,
 };
@@ -23,8 +24,8 @@ use infrastructure::{
     UuidPaymentIdGenerator,
 };
 use presentation::keyboard::{
-    channel_subs_keyboard, pay_link_keyboard, pay_provider_keyboard, snooze_code_to_label,
-    snooze_code_to_minutes,
+    channel_subs_keyboard, pay_link_keyboard, pay_provider_keyboard, reminder_confirm_keyboard,
+    reminder_edit_keyboard, snooze_code_to_label, snooze_code_to_minutes, text_confirm_keyboard,
 };
 use presentation::{
     CallbackRoute, ChannelPlatform, IncomingCallback, IncomingMessage, MessageRoute, Notification,
@@ -269,7 +270,7 @@ impl BotHandler {
             MessageRoute::CreateReminderFromCommand(text)
             | MessageRoute::ReminderText(text)
             | MessageRoute::GroupReminderText(text) => {
-                self.create_task_and_reminder(message.peer_id, message.user_id, &text)
+                self.start_reminder_text_confirmation(message.peer_id, message.user_id, text)
                     .await
             }
             MessageRoute::ListReminders => {
@@ -305,12 +306,9 @@ impl BotHandler {
                 )
                 .await
             }
-            MessageRoute::ReminderEditText(_) => {
-                self.send_text(
-                    message.peer_id,
-                    "Этот ввод пока не ожидается новым service binary.",
-                )
-                .await
+            MessageRoute::ReminderEditText(input) => {
+                self.handle_reminder_edit_text(message.peer_id, message.user_id, &input)
+                    .await
             }
         }
     }
@@ -422,7 +420,7 @@ impl BotHandler {
                 self.start_channel_subscription_deletion(callback.peer_id, callback.user_id)
                     .await
             }
-            CallbackRoute::BackFromReminderDeletion | CallbackRoute::CancelReminder => {
+            CallbackRoute::BackFromReminderDeletion => {
                 self.state_store
                     .set_state(UserId::new(callback.user_id), DialogState::Idle)
                     .await?;
@@ -449,23 +447,24 @@ impl BotHandler {
                 )
                 .await
             }
-            CallbackRoute::ConfirmText
-            | CallbackRoute::ConfirmReminder
-            | CallbackRoute::EditReminder => {
-                self.state_store
-                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
-                    .await?;
-                self.send_text(
-                    callback.peer_id,
-                    "Подтверждение напоминаний больше не используется. Отправьте текст заново, и я сразу создам напоминание.",
-                )
-                .await
+            CallbackRoute::ConfirmText => {
+                self.preview_reminder_from_pending_text(callback.peer_id, callback.user_id)
+                    .await
             }
-            CallbackRoute::CancelText => {
+            CallbackRoute::ConfirmReminder => {
+                self.create_confirmed_reminder(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::EditReminder => {
+                self.start_reminder_edit(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::CancelText | CallbackRoute::CancelReminder => {
                 self.state_store
                     .set_state(UserId::new(callback.user_id), DialogState::Idle)
                     .await?;
-                self.send_text(callback.peer_id, "Действие отменено.").await
+                self.send_text(callback.peer_id, "Создание напоминания отменено.")
+                    .await
             }
             CallbackRoute::Unknown(_) => {
                 self.send_text(callback.peer_id, "Неизвестное действие.")
@@ -651,28 +650,169 @@ impl BotHandler {
         .await
     }
 
-    async fn create_task_and_reminder(&self, peer_id: i64, user_id: i64, text: &str) -> Result<()> {
-        let created = CreateReminderFromTextUseCase::new(
-            &self.store,
-            &self.store,
-            &self.store,
-            &self.llm,
-            &self.clock,
-        )
-        .execute(CreateReminderFromTextCommand {
-            user_id: UserId::new(user_id),
-            chat_id: ChatId::new(peer_id),
-            text: text.to_string(),
-        })
-        .await?;
-        let reminder = created.reminder;
-
-        let text = format!(
-            "Запомнил: {}\nСработает: {}",
-            reminder.text,
-            reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+    async fn start_reminder_text_confirmation(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        text: String,
+    ) -> Result<()> {
+        let confirmation_text = format!(
+            "📝 <b>Создать напоминание из этого текста?</b>\n\n<i>{}</i>",
+            html_escape(&text)
         );
-        self.send_text(peer_id, &text).await
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: confirmation_text,
+                keyboard: Some(text_confirm_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await?;
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingTextConfirmation { text },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn preview_reminder_from_pending_text(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let state = self.state_store.get_state(UserId::new(user_id)).await?;
+        let DialogState::AwaitingTextConfirmation { text } = state else {
+            return self
+                .send_text(peer_id, "Нет текста напоминания для подтверждения.")
+                .await;
+        };
+
+        self.send_text(peer_id, "Анализирую текст напоминания...")
+            .await?;
+        let preview = match PreviewReminderFromTextUseCase::new(&self.store, &self.llm)
+            .execute(PreviewReminderFromTextCommand {
+                user_id: UserId::new(user_id),
+                text,
+            })
+            .await
+        {
+            Ok(preview) => preview,
+            Err(error) => {
+                error!(%error, "failed to preview reminder text");
+                self.state_store
+                    .set_state(UserId::new(user_id), DialogState::Idle)
+                    .await?;
+                return self
+                    .send_text(
+                        peer_id,
+                        "Не удалось распознать напоминание. Попробуйте ещё раз.",
+                    )
+                    .await;
+            }
+        };
+
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format_reminder_preview(&preview.interpreted),
+                keyboard: Some(reminder_confirm_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await?;
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingReminderConfirmation {
+                    original_text: preview.original_text,
+                    interpreted: preview.interpreted,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn create_confirmed_reminder(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let state = self.state_store.get_state(UserId::new(user_id)).await?;
+        let DialogState::AwaitingReminderConfirmation { interpreted, .. } = state else {
+            return self
+                .send_text(peer_id, "Нет напоминания для подтверждения.")
+                .await;
+        };
+
+        let created = CreateReminderFromPreviewUseCase::new(&self.store, &self.store, &self.clock)
+            .execute(CreateReminderFromPreviewCommand {
+                user_id: UserId::new(user_id),
+                chat_id: ChatId::new(peer_id),
+                interpreted,
+            })
+            .await?;
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::Idle)
+            .await?;
+
+        let reminder = created.reminder;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format!(
+                    "✅ <b>Напоминание создано!</b>\n\n📌 {}\n🕐 {}\n🆔 #{}",
+                    html_escape(&reminder.text),
+                    reminder.next_at.format("%d.%m.%Y %H:%M UTC"),
+                    reminder.id.map(|id| id.value()).unwrap_or_default()
+                ),
+                keyboard: None,
+            },
+        )
+        .await
+    }
+
+    async fn start_reminder_edit(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let state = self.state_store.get_state(UserId::new(user_id)).await?;
+        let DialogState::AwaitingReminderConfirmation {
+            original_text,
+            interpreted,
+        } = state
+        else {
+            return self
+                .send_text(peer_id, "Нет напоминания для редактирования.")
+                .await;
+        };
+        let text = format!(
+            "✏️ Введите новый текст напоминания:\n\n<i>Текущий:</i> {}",
+            html_escape(&original_text)
+        );
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text,
+                keyboard: Some(reminder_edit_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await?;
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingReminderEdit {
+                    original_text,
+                    interpreted,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn handle_reminder_edit_text(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        text: &str,
+    ) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return self
+                .send_text(peer_id, "Текст не может быть пустым. Введите новый текст.")
+                .await;
+        }
+        self.start_reminder_text_confirmation(peer_id, user_id, text.to_string())
+            .await
     }
 
     async fn show_active_tasks(&self, peer_id: i64, user_id: i64) -> Result<()> {
@@ -1066,6 +1206,32 @@ fn format_profile_subscription(status: Option<SubscriptionStatus>) -> String {
         Some(SubscriptionStatus::Expired) => "не активна".to_string(),
         None => "не оформлена".to_string(),
     }
+}
+
+fn format_reminder_preview(interpreted: &InterpretedTask) -> String {
+    format!(
+        "📝 <b>Подтвердите напоминание:</b>\n\n\
+         📌 <b>Текст:</b> {}\n\
+         🕐 <b>Время:</b> {}\n\
+         🔄 <b>Тип:</b> {}\n\n\
+         Подтвердите создание или отредактируйте текст.",
+        html_escape(&interpreted.title),
+        interpreted.trigger_at.format("%d.%m.%Y %H:%M UTC"),
+        reminder_type_label(interpreted)
+    )
+}
+
+fn reminder_type_label(interpreted: &InterpretedTask) -> &'static str {
+    match &interpreted.schedule {
+        domain::Schedule::OneTime(_) => "разовое",
+        domain::Schedule::Recurring { .. } => "повторяющееся",
+    }
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {
