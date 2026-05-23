@@ -1,26 +1,32 @@
 use std::{collections::HashMap, sync::Mutex};
 
 use application::{
-    active_tasks, CancelReminderUseCase, CheckTwitchStreamsUseCase, Clock, CompleteReminderUseCase,
-    CompleteTaskUseCase, ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
+    active_tasks, CancelReminderUseCase, CheckSubscriptionPaymentUseCase,
+    CheckTwitchStreamsUseCase, Clock, CompleteReminderUseCase, CompleteTaskUseCase,
+    ConsumeReferralRewardUseCase, CreatePaymentCommand, CreatePaymentUseCase,
     CreateReferralUseCase, CreateReminderCommand, CreateReminderFromTextCommand,
-    CreateReminderFromTextUseCase, CreateReminderUseCase, CreateTaskFromTextUseCase,
+    CreateReminderFromTextUseCase, CreateReminderUseCase, CreateSubscriptionPaymentCommand,
+    CreateSubscriptionPaymentUseCase, CreateTaskFromTextUseCase,
     DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DeliverDueRemindersUseCase, DeliveryEventRepository, DialogState, DialogStateStore,
-    ExternalChannelSubscriptionRepository, InterpretedTask, ListActiveRemindersUseCase,
-    ListExternalChannelSubscriptionsUseCase, NaturalLanguageInterpreter, Notification, Notifier,
-    PaymentGateway, PaymentRepository, ReferralRepository, ReminderActionCommand,
+    ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
+    ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
+    NaturalLanguageInterpreter, Notification, Notifier, PaymentCachePort, PaymentGateway,
+    PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
+    ProcessSubscriptionPaymentWebhookUseCase, ReferralRepository, ReminderActionCommand,
     ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
-    TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
+    SubscriptionRepository, TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository,
+    UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use domain::{
     ChannelSubscription, ChatId, DeliveryChannel, DeliveryEvent, DeliveryEventId, DeliveryResult,
-    Money, Payment, PaymentId, PaymentProvider, PaymentStatus, Platform, RecurrenceRule, Reminder,
-    ReminderId, ReminderStatus, RetryPolicy, Schedule, Task, TaskId, TaskStatus, TimePreferences,
-    TimeSpec, User, UserId, UserPreferences,
+    Money, Months, Payment, PaymentId, PaymentProvider, PaymentStatus, PaymentTransaction,
+    Platform, RecurrenceRule, Reminder, ReminderId, ReminderStatus, RetryPolicy, Schedule,
+    Subscription, Task, TaskId, TaskStatus, TimePreferences, TimeSpec, User, UserId,
+    UserPreferences,
 };
 
 #[tokio::test]
@@ -302,6 +308,50 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .unwrap();
     assert_eq!(payment.status, PaymentStatus::Succeeded);
 
+    let subscription_payment =
+        CreateSubscriptionPaymentUseCase::new(&store, &store, &store, &store, &store)
+            .execute(CreateSubscriptionPaymentCommand {
+                user_id,
+                months: Months::THREE,
+            })
+            .await
+            .unwrap();
+    assert_eq!(subscription_payment.transaction.amount, Money::rub(195));
+    assert_eq!(subscription_payment.transaction.months, Some(Months::THREE));
+    assert_eq!(
+        store.pending_payment_user(&subscription_payment.transaction.payment_id),
+        Some(user_id)
+    );
+    assert!(subscription_payment
+        .confirmation_url
+        .contains(subscription_payment.transaction.payment_id.as_str()));
+
+    let pending = CheckSubscriptionPaymentUseCase::new(&store, &store, &store)
+        .execute(&subscription_payment.transaction.payment_id)
+        .await
+        .unwrap();
+    assert!(pending.subscription.is_none());
+
+    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::new(&store, &store, &store)
+        .execute(
+            &subscription_payment.transaction.payment_id,
+            PaymentStatus::Succeeded,
+        )
+        .await
+        .unwrap();
+    let subscription = fulfilled.subscription.unwrap();
+    assert!(fulfilled.transaction.fulfilled);
+    assert_eq!(subscription.user_id, Some(user_id));
+    assert_eq!(subscription.chat_id, ChatId::new(user_id.value()));
+    assert!(subscription.expires_at > fixed_now());
+
+    let fulfilled_again = CheckSubscriptionPaymentUseCase::new(&store, &store, &store)
+        .execute(&subscription_payment.transaction.payment_id)
+        .await
+        .unwrap();
+    assert!(fulfilled_again.transaction.fulfilled);
+    assert!(fulfilled_again.subscription.is_none());
+
     let saved_subscription = SaveExternalChannelSubscriptionUseCase::new(&store, &store)
         .execute(SaveExternalChannelSubscriptionCommand {
             user_id,
@@ -393,6 +443,10 @@ struct AppState {
     events: HashMap<ReminderId, Vec<DeliveryEvent>>,
     next_event_id: i64,
     payments: HashMap<PaymentId, Payment>,
+    payment_transactions: HashMap<PaymentId, PaymentTransaction>,
+    pending_payments: HashMap<PaymentId, UserId>,
+    next_payment_id: i64,
+    subscriptions: HashMap<ChatId, Subscription>,
     channels: HashMap<UserId, Vec<ChannelSubscription>>,
     latest_content: HashMap<String, Option<String>>,
     referrals: HashMap<(UserId, UserId), domain::Referral>,
@@ -452,6 +506,15 @@ impl AppMemory {
             .get(&reminder_id)
             .cloned()
             .unwrap()
+    }
+
+    fn pending_payment_user(&self, payment_id: &PaymentId) -> Option<UserId> {
+        self.state
+            .lock()
+            .unwrap()
+            .pending_payments
+            .get(payment_id)
+            .copied()
     }
 }
 
@@ -696,6 +759,97 @@ impl PaymentRepository for AppMemory {
 impl PaymentGateway for AppMemory {
     async fn create_payment(&self, payment: &Payment) -> application::ApplicationResult<String> {
         Ok(format!("https://pay.example/{}", payment.id))
+    }
+}
+
+#[async_trait]
+impl PaymentTransactionRepository for AppMemory {
+    async fn find_payment_transaction(
+        &self,
+        payment_id: &PaymentId,
+    ) -> application::ApplicationResult<Option<PaymentTransaction>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .payment_transactions
+            .get(payment_id)
+            .cloned())
+    }
+
+    async fn save_payment_transaction(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> application::ApplicationResult<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .payment_transactions
+            .insert(transaction.payment_id.clone(), transaction.clone());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PaymentCachePort for AppMemory {
+    async fn remember_pending_payment(
+        &self,
+        payment_id: &PaymentId,
+        user_id: UserId,
+        _expires_at: DateTime<Utc>,
+    ) -> application::ApplicationResult<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .pending_payments
+            .insert(payment_id.clone(), user_id);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PaymentGatewayPort for AppMemory {
+    async fn create_payment(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> application::ApplicationResult<String> {
+        Ok(format!("https://pay.example/{}", transaction.payment_id))
+    }
+}
+
+impl IdGenerator for AppMemory {
+    fn new_payment_id(&self) -> PaymentId {
+        let mut state = self.state.lock().unwrap();
+        state.next_payment_id += 1;
+        PaymentId::new(format!("subscription-payment-{}", state.next_payment_id))
+    }
+}
+
+#[async_trait]
+impl SubscriptionRepository for AppMemory {
+    async fn find_subscription(
+        &self,
+        chat_id: ChatId,
+    ) -> application::ApplicationResult<Option<Subscription>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .subscriptions
+            .get(&chat_id)
+            .cloned())
+    }
+
+    async fn save_subscription(
+        &self,
+        subscription: &Subscription,
+    ) -> application::ApplicationResult<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .subscriptions
+            .insert(subscription.chat_id, subscription.clone());
+        Ok(())
     }
 }
 

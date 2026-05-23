@@ -11,7 +11,7 @@ pub enum CallbackPayload {
     PayCancel,
     PaySelect(i32),
     PayYooKassa(i32),
-    PayCheck(i32),
+    PayCheck(String),
     TextConfirm,
     TextCancel,
     ReminderConfirm,
@@ -90,8 +90,9 @@ fn parse_prefixed_payload(payload: &str) -> CallbackPayload {
     }
 
     if let Some(rest) = payload.strip_prefix("pay_check:") {
-        if let Ok(months) = rest.parse() {
-            return CallbackPayload::PayCheck(months);
+        let payment_id = rest.trim();
+        if !payment_id.is_empty() {
+            return CallbackPayload::PayCheck(payment_id.to_string());
         }
     }
 

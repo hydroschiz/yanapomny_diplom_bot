@@ -1,6 +1,6 @@
-use application::{ApplicationError, ApplicationResult, PaymentGateway};
+use application::{ApplicationError, ApplicationResult, PaymentGateway, PaymentGatewayPort};
 use async_trait::async_trait;
-use domain::{Currency, Payment};
+use domain::{Currency, Money, Payment, PaymentTransaction};
 use serde::Deserialize;
 
 const YOOKASSA_CREATE_PAYMENT_URL: &str = "https://api.yookassa.ru/v3/payments";
@@ -26,32 +26,39 @@ impl HttpYooKassaPaymentGateway {
             return_url: return_url.into(),
         }
     }
-}
 
-#[async_trait]
-impl PaymentGateway for HttpYooKassaPaymentGateway {
-    async fn create_payment(&self, payment: &Payment) -> ApplicationResult<String> {
+    async fn create_redirect_payment(
+        &self,
+        amount: Money,
+        idempotence_key: &str,
+        metadata: serde_json::Value,
+        description: Option<String>,
+    ) -> ApplicationResult<String> {
         let amount = serde_json::json!({
-            "value": format!("{}.00", payment.amount.amount),
-            "currency": currency_code(payment.amount.currency),
+            "value": format!("{}.00", amount.amount),
+            "currency": currency_code(amount.currency),
         });
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "amount": amount,
             "capture": true,
             "confirmation": {
                 "type": "redirect",
                 "return_url": self.return_url,
             },
-            "metadata": {
-                "payment_id": payment.id.as_str(),
-            },
+            "metadata": metadata,
         });
+        if let (Some(description), Some(request)) = (description, request.as_object_mut()) {
+            request.insert(
+                "description".to_string(),
+                serde_json::Value::String(description),
+            );
+        }
 
         let response = self
             .client
             .post(YOOKASSA_CREATE_PAYMENT_URL)
             .basic_auth(&self.shop_id, Some(&self.secret_key))
-            .header("Idempotence-Key", payment.id.as_str())
+            .header("Idempotence-Key", idempotence_key)
             .json(&request)
             .send()
             .await
@@ -74,6 +81,51 @@ impl PaymentGateway for HttpYooKassaPaymentGateway {
                 "YooKassa response has no confirmation_url".to_string(),
             )
         })
+    }
+}
+
+#[async_trait]
+impl PaymentGateway for HttpYooKassaPaymentGateway {
+    async fn create_payment(&self, payment: &Payment) -> ApplicationResult<String> {
+        self.create_redirect_payment(
+            payment.amount,
+            payment.id.as_str(),
+            serde_json::json!({
+                "payment_id": payment.id.as_str(),
+            }),
+            None,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
+    async fn create_payment(&self, transaction: &PaymentTransaction) -> ApplicationResult<String> {
+        let mut metadata = serde_json::json!({
+            "payment_id": transaction.payment_id.as_str(),
+            "user_id": transaction.user_id.to_string(),
+        });
+        if let (Some(months), Some(metadata)) = (transaction.months, metadata.as_object_mut()) {
+            metadata.insert(
+                "months".to_string(),
+                serde_json::Value::String(months.to_string()),
+            );
+        }
+        let description = transaction
+            .months
+            .map(|months| format!("Подписка на {} мес.", months));
+
+        self.create_redirect_payment(
+            transaction.amount,
+            transaction
+                .idempotence_key
+                .as_deref()
+                .unwrap_or(transaction.payment_id.as_str()),
+            metadata,
+            description,
+        )
+        .await
     }
 }
 

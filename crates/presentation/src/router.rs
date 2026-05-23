@@ -98,7 +98,7 @@ pub enum CallbackRoute {
     CancelPayment,
     SelectPaymentPeriod(i32),
     StartYooKassaPayment(i32),
-    CheckPayment(i32),
+    CheckPayment(String),
     ConfirmText,
     CancelText,
     ConfirmReminder,

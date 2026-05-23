@@ -1,11 +1,12 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use application::ProcessYooKassaWebhookUseCase;
+use application::ProcessSubscriptionPaymentWebhookUseCase;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use domain::{PaymentId, PaymentStatus};
-use infrastructure::MongoStore;
+use infrastructure::{MongoStore, SystemClock};
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -16,7 +17,10 @@ async fn main() -> Result<()> {
 
     let config = WebhookConfig::from_env()?;
     let store = MongoStore::connect(&config.mongo_uri, &config.mongo_db).await?;
-    let state = Arc::new(AppState { store });
+    let state = Arc::new(AppState {
+        store,
+        clock: SystemClock,
+    });
     let app = Router::new()
         .route("/yookassa", post(yookassa_webhook))
         .with_state(state);
@@ -36,6 +40,7 @@ async fn main() -> Result<()> {
 #[derive(Clone)]
 struct AppState {
     store: MongoStore,
+    clock: SystemClock,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,26 +54,23 @@ struct YooKassaPaymentObject {
     id: String,
     status: String,
     #[serde(default)]
-    metadata: HashMap<String, String>,
+    metadata: HashMap<String, Value>,
 }
 
 async fn yookassa_webhook(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<YooKassaWebhook>,
 ) -> StatusCode {
-    let payment_id = payload
-        .object
-        .metadata
-        .get("payment_id")
-        .cloned()
-        .unwrap_or(payload.object.id);
+    let payment_id =
+        metadata_string(&payload.object.metadata, "payment_id").unwrap_or(payload.object.id);
     let status = yookassa_status(&payload.object.status, &payload.event);
     let payment_id = PaymentId::new(payment_id);
-    let use_case = ProcessYooKassaWebhookUseCase::new(&state.store);
+    let use_case =
+        ProcessSubscriptionPaymentWebhookUseCase::new(&state.store, &state.store, &state.clock);
 
     match use_case.execute(&payment_id, status).await {
         Ok(payment) => {
-            info!(payment_id = %payment.id, "processed YooKassa webhook");
+            info!(payment_id = %payment.transaction.payment_id, "processed YooKassa webhook");
             StatusCode::OK
         }
         Err(error) => {
@@ -76,6 +78,15 @@ async fn yookassa_webhook(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+fn metadata_string(metadata: &HashMap<String, Value>, key: &str) -> Option<String> {
+    metadata.get(key).and_then(|value| {
+        value
+            .as_str()
+            .map(ToString::to_string)
+            .or_else(|| value.as_i64().map(|value| value.to_string()))
+    })
 }
 
 fn yookassa_status(status: &str, event: &str) -> PaymentStatus {

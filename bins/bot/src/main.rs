@@ -2,24 +2,30 @@ use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
 use application::{
-    active_tasks, ApplicationError, CancelReminderUseCase, CompleteReminderUseCase,
-    CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    active_tasks, ApplicationError, CancelReminderUseCase, CheckSubscriptionPaymentUseCase, Clock,
+    CompleteReminderUseCase, CreateReminderFromTextCommand, CreateReminderFromTextUseCase,
+    CreateSubscriptionPaymentCommand, CreateSubscriptionPaymentUseCase,
     DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
     ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase, ListTasksUseCase,
     ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
-    SetUserTimezoneUseCase, SnoozeReminderUseCase,
+    SetUserTimezoneUseCase, SnoozeReminderUseCase, SubscriptionRepository,
 };
 use async_trait::async_trait;
 use domain::{
-    ChatId, ExternalChannelSubscription, Platform, Reminder, ReminderId, ReminderStatus,
-    SnoozeDuration, SubscriptionPolicy, Task, TimePreferences, UserId,
+    tariff_for_months, ChatId, ExternalChannelSubscription, Months, PaymentId, PaymentStatus,
+    Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy, Task,
+    TimePreferences, UserId,
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
+    UuidPaymentIdGenerator,
 };
-use presentation::keyboard::{channel_subs_keyboard, snooze_code_to_label, snooze_code_to_minutes};
+use presentation::keyboard::{
+    channel_subs_keyboard, pay_link_keyboard, pay_provider_keyboard, snooze_code_to_label,
+    snooze_code_to_minutes,
+};
 use presentation::{
     CallbackRoute, ChannelPlatform, IncomingCallback, IncomingMessage, MessageRoute, Notification,
     ParsedChannelLink, Renderer, RouteContext, Router, TimezoneDisplay,
@@ -35,8 +41,8 @@ async fn main() -> Result<()> {
 
     let config = BotConfig::from_env()?;
     let store = MongoStore::connect(&config.mongo_uri, &config.mongo_db).await?;
-    let _payment_cache = RedisPaymentCache::new(&config.redis_url)?;
-    let _payment_gateway = config.payment_gateway();
+    let payment_cache = RedisPaymentCache::new(&config.redis_url)?;
+    let payment_gateway = config.payment_gateway();
     let llm = HttpLlmInterpreter::new(config.llm_api_url.clone())?;
     let transport = VkTransport::new(config.vk_access_token.clone())?;
 
@@ -45,6 +51,9 @@ async fn main() -> Result<()> {
         store: store.clone(),
         llm,
         clock: SystemClock,
+        payment_cache,
+        payment_gateway,
+        payment_ids: UuidPaymentIdGenerator,
         state_store: store,
         bot_username: config.bot_username.clone(),
         router: Router,
@@ -107,6 +116,9 @@ struct BotHandler {
     store: MongoStore,
     llm: HttpLlmInterpreter,
     clock: SystemClock,
+    payment_cache: RedisPaymentCache,
+    payment_gateway: Option<HttpYooKassaPaymentGateway>,
+    payment_ids: UuidPaymentIdGenerator,
     state_store: MongoStore,
     bot_username: String,
     router: Router,
@@ -252,16 +264,7 @@ impl BotHandler {
                 self.send_notification(message.peer_id, Notification::SetupMenu)
                     .await
             }
-            MessageRoute::ShowPay => {
-                self.send_notification(
-                    message.peer_id,
-                    Notification::PayMenu {
-                        is_active: false,
-                        expiry: None,
-                    },
-                )
-                .await
-            }
+            MessageRoute::ShowPay => self.show_payment_menu(message.peer_id).await,
             MessageRoute::ShowProfile => {
                 let profile = GetProfileUseCase::new(&self.store, &self.store, &self.clock)
                     .execute(UserId::new(message.user_id), ChatId::new(message.peer_id))
@@ -387,15 +390,22 @@ impl BotHandler {
                 self.update_timezone(callback.peer_id, callback.user_id, &offset)
                     .await
             }
-            CallbackRoute::ShowPayMenu => {
-                self.send_notification(
-                    callback.peer_id,
-                    Notification::PayMenu {
-                        is_active: false,
-                        expiry: None,
-                    },
-                )
-                .await
+            CallbackRoute::ShowPayMenu => self.show_payment_menu(callback.peer_id).await,
+            CallbackRoute::SelectPaymentPeriod(months) => {
+                self.select_payment_period(callback.peer_id, months).await
+            }
+            CallbackRoute::StartYooKassaPayment(months) => {
+                self.start_yookassa_payment(callback.peer_id, callback.user_id, months)
+                    .await
+            }
+            CallbackRoute::CheckPayment(payment_id) => {
+                self.check_payment(callback.peer_id, &payment_id).await
+            }
+            CallbackRoute::CancelPayment => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(callback.peer_id, "Оплата отменена.").await
             }
             CallbackRoute::ShowProfile => {
                 self.send_notification(
@@ -457,6 +467,156 @@ impl BotHandler {
                 .await
             }
         }
+    }
+
+    async fn show_payment_menu(&self, peer_id: i64) -> Result<()> {
+        let subscription = self.store.find_subscription(ChatId::new(peer_id)).await?;
+        let now = self.clock.now();
+        let is_active = subscription
+            .as_ref()
+            .is_some_and(|subscription| subscription.is_active(now));
+        let expiry = subscription
+            .as_ref()
+            .filter(|subscription| subscription.is_active(now))
+            .map(|subscription| subscription.expires_at.format("%d.%m.%Y").to_string());
+
+        self.send_notification(peer_id, Notification::PayMenu { is_active, expiry })
+            .await
+    }
+
+    async fn select_payment_period(&self, peer_id: i64, months: i32) -> Result<()> {
+        let Some(tariff) = supported_tariff(months) else {
+            return self.send_text(peer_id, "Такой тариф недоступен.").await;
+        };
+        let text = format!(
+            "Вы выбрали подписку на {} мес.\nСтоимость: {}₽.\n\nВыберите способ оплаты:",
+            tariff.months.value(),
+            tariff.price.amount
+        );
+
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text,
+                keyboard: Some(pay_provider_keyboard(
+                    i32::from(tariff.months.value()),
+                    self.transport.capabilities(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn start_yookassa_payment(&self, peer_id: i64, user_id: i64, months: i32) -> Result<()> {
+        let Some(tariff) = supported_tariff(months) else {
+            return self.send_text(peer_id, "Такой тариф недоступен.").await;
+        };
+        let Some(gateway) = self.payment_gateway.as_ref() else {
+            return self
+                .send_notification(peer_id, Notification::PaymentDisabled)
+                .await;
+        };
+
+        let user_id = UserId::new(user_id);
+        EnsureUserUseCase::new(&self.store).execute(user_id).await?;
+        let created = match CreateSubscriptionPaymentUseCase::new(
+            &self.store,
+            gateway,
+            &self.payment_cache,
+            &self.payment_ids,
+            &self.clock,
+        )
+        .execute(CreateSubscriptionPaymentCommand {
+            user_id,
+            months: tariff.months,
+        })
+        .await
+        {
+            Ok(created) => created,
+            Err(ApplicationError::Conflict(_)) => {
+                return self.send_text(peer_id, "Такой тариф недоступен.").await;
+            }
+            Err(error) => {
+                error!(%error, "failed to create YooKassa payment");
+                return self
+                    .send_text(peer_id, "Не удалось создать платёж. Попробуйте позже.")
+                    .await;
+            }
+        };
+
+        let text = format!(
+            "Платёж на {} мес. создан.\nСумма: {}₽.\n\nНажмите кнопку оплаты, затем вернитесь и нажмите «Проверить оплату».",
+            tariff.months.value(),
+            tariff.price.amount
+        );
+
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text,
+                keyboard: Some(pay_link_keyboard(
+                    &created.confirmation_url,
+                    created.transaction.payment_id.as_str(),
+                    self.transport.capabilities(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn check_payment(&self, peer_id: i64, payment_id: &str) -> Result<()> {
+        let payment_id = payment_id.trim();
+        if payment_id.is_empty() {
+            return self
+                .send_text(peer_id, "Не смог определить платёж для проверки.")
+                .await;
+        }
+        let payment_id = PaymentId::new(payment_id);
+        let status =
+            match CheckSubscriptionPaymentUseCase::new(&self.store, &self.store, &self.clock)
+                .execute(&payment_id)
+                .await
+            {
+                Ok(status) => status,
+                Err(ApplicationError::NotFound { .. }) => {
+                    return self
+                        .send_text(peer_id, "Платёж не найден. Оформите новый платёж.")
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            };
+
+        let text = match &status.transaction.status {
+            PaymentStatus::Succeeded => {
+                if status.transaction.fulfilled || status.subscription.is_some() {
+                    status
+                        .subscription
+                        .as_ref()
+                        .map(|subscription| {
+                            format!(
+                                "✅ Платёж подтверждён. Подписка активна до {}.",
+                                subscription.expires_at.format("%d.%m.%Y")
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            "✅ Платёж подтверждён. Подписка активирована.".to_string()
+                        })
+                } else {
+                    "✅ Платёж подтверждён. Подписка скоро будет активирована.".to_string()
+                }
+            }
+            PaymentStatus::Pending | PaymentStatus::WaitingForCapture => {
+                "⏳ Платёж ещё обрабатывается. Попробуйте проверить позже.".to_string()
+            }
+            PaymentStatus::Canceled => "❌ Платёж отменён. Оформите новый платёж.".to_string(),
+            PaymentStatus::Failed => "❌ Платёж не прошёл. Оформите новый платёж.".to_string(),
+            PaymentStatus::Unknown(status) => format!(
+                "Статус платежа: {}. Подождите или попробуйте позже.",
+                status
+            ),
+        };
+
+        self.send_text(peer_id, &text).await
     }
 
     async fn update_timezone(&self, peer_id: i64, user_id: i64, offset: &str) -> Result<()> {
@@ -853,6 +1013,11 @@ fn channel_platform(platform: ChannelPlatform) -> Platform {
         ChannelPlatform::Twitch => Platform::Twitch,
         ChannelPlatform::Youtube => Platform::Youtube,
     }
+}
+
+fn supported_tariff(months: i32) -> Option<domain::Tariff> {
+    let months = Months::new(months).ok()?;
+    tariff_for_months(months).copied()
 }
 
 fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {

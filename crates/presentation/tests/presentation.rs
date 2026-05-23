@@ -152,7 +152,10 @@ fn payload_parser_handles_callbacks_with_arguments() {
     );
     assert_eq!(parse_payload("pay_select:6"), CallbackPayload::PaySelect(6));
     assert_eq!(parse_payload("pay_yk:12"), CallbackPayload::PayYooKassa(12));
-    assert_eq!(parse_payload("pay_check:3"), CallbackPayload::PayCheck(3));
+    assert_eq!(
+        parse_payload("pay_check:payment-3"),
+        CallbackPayload::PayCheck("payment-3".to_string())
+    );
     assert_eq!(
         parse_payload("snooze:42:1hourSnooze"),
         CallbackPayload::Snooze {
@@ -219,7 +222,11 @@ fn utc_keyboard_pages_fit_vk_limits_and_cover_offsets() {
 
 #[test]
 fn pay_link_keyboard_keeps_url_button_transport_neutral() {
-    let keyboard = pay_link_keyboard("https://pay.example", 3, TransportCapabilities::vk_inline());
+    let keyboard = pay_link_keyboard(
+        "https://pay.example",
+        "payment-3",
+        TransportCapabilities::vk_inline(),
+    );
 
     assert!(keyboard.fits(TransportCapabilities::vk_inline()));
     assert!(matches!(

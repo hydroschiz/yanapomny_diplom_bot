@@ -1,6 +1,13 @@
-use domain::{Money, Payment, PaymentId, PaymentProvider, PaymentStatus};
+use chrono::Duration;
+use domain::{
+    tariff_for_months, ChatId, Money, Months, Payment, PaymentId, PaymentProvider, PaymentStatus,
+    PaymentTransaction, Subscription, SubscriptionPolicy, UserId,
+};
 
-use crate::{ApplicationError, ApplicationResult, Clock, PaymentGateway, PaymentRepository};
+use crate::{
+    ApplicationError, ApplicationResult, Clock, IdGenerator, PaymentCachePort, PaymentGateway,
+    PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository, SubscriptionRepository,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePaymentCommand {
@@ -82,5 +89,212 @@ where
         payment.update_status(status);
         self.payments.save_payment(&payment).await?;
         Ok(payment)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateSubscriptionPaymentCommand {
+    pub user_id: UserId,
+    pub months: Months,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedSubscriptionPayment {
+    pub transaction: PaymentTransaction,
+    pub confirmation_url: String,
+}
+
+pub struct CreateSubscriptionPaymentUseCase<'a, T, G, P, I, C> {
+    transactions: &'a T,
+    gateway: &'a G,
+    pending_cache: &'a P,
+    ids: &'a I,
+    clock: &'a C,
+}
+
+impl<'a, T, G, P, I, C> CreateSubscriptionPaymentUseCase<'a, T, G, P, I, C>
+where
+    T: PaymentTransactionRepository,
+    G: PaymentGatewayPort,
+    P: PaymentCachePort,
+    I: IdGenerator,
+    C: Clock,
+{
+    pub const fn new(
+        transactions: &'a T,
+        gateway: &'a G,
+        pending_cache: &'a P,
+        ids: &'a I,
+        clock: &'a C,
+    ) -> Self {
+        Self {
+            transactions,
+            gateway,
+            pending_cache,
+            ids,
+            clock,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        command: CreateSubscriptionPaymentCommand,
+    ) -> ApplicationResult<CreatedSubscriptionPayment> {
+        let tariff = tariff_for_months(command.months).ok_or_else(|| {
+            ApplicationError::Conflict(format!("unsupported tariff: {} months", command.months))
+        })?;
+        let now = self.clock.now();
+        let payment_id = self.ids.new_payment_id();
+        let mut transaction = PaymentTransaction::new(
+            payment_id.clone(),
+            command.user_id,
+            tariff.price,
+            Some(command.months),
+            now,
+        );
+        transaction.provider = Some("yookassa".to_string());
+        transaction.idempotence_key = Some(payment_id.to_string());
+        self.transactions
+            .save_payment_transaction(&transaction)
+            .await?;
+        let confirmation_url = self.gateway.create_payment(&transaction).await?;
+        self.pending_cache
+            .remember_pending_payment(&payment_id, command.user_id, now + Duration::minutes(30))
+            .await?;
+
+        Ok(CreatedSubscriptionPayment {
+            transaction,
+            confirmation_url,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionPaymentStatus {
+    pub transaction: PaymentTransaction,
+    pub subscription: Option<Subscription>,
+}
+
+pub struct CheckSubscriptionPaymentUseCase<'a, T, S, C> {
+    transactions: &'a T,
+    subscriptions: &'a S,
+    clock: &'a C,
+}
+
+impl<'a, T, S, C> CheckSubscriptionPaymentUseCase<'a, T, S, C>
+where
+    T: PaymentTransactionRepository,
+    S: SubscriptionRepository,
+    C: Clock,
+{
+    pub const fn new(transactions: &'a T, subscriptions: &'a S, clock: &'a C) -> Self {
+        Self {
+            transactions,
+            subscriptions,
+            clock,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        payment_id: &PaymentId,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        let transaction = self.load_transaction(payment_id).await?;
+        self.fulfill_if_succeeded(transaction).await
+    }
+
+    async fn load_transaction(
+        &self,
+        payment_id: &PaymentId,
+    ) -> ApplicationResult<PaymentTransaction> {
+        self.transactions
+            .find_payment_transaction(payment_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound {
+                entity: "payment_transaction",
+                id: payment_id.to_string(),
+            })
+    }
+
+    async fn fulfill_if_succeeded(
+        &self,
+        mut transaction: PaymentTransaction,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        if transaction.status != PaymentStatus::Succeeded || transaction.fulfilled {
+            return Ok(SubscriptionPaymentStatus {
+                transaction,
+                subscription: None,
+            });
+        }
+
+        let Some(months) = transaction.months else {
+            return Err(ApplicationError::Conflict(
+                "payment transaction has no subscription period".to_string(),
+            ));
+        };
+        let now = self.clock.now();
+        let chat_id = ChatId::new(transaction.user_id.value());
+        let mut subscription = self
+            .subscriptions
+            .find_subscription(chat_id)
+            .await?
+            .unwrap_or_else(|| {
+                Subscription::new_trial(chat_id, now, SubscriptionPolicy { trial_days: 0 })
+            });
+        subscription.link_user(transaction.user_id);
+        subscription.extend(months, now);
+        self.subscriptions.save_subscription(&subscription).await?;
+        transaction.mark_fulfilled(now);
+        self.transactions
+            .save_payment_transaction(&transaction)
+            .await?;
+
+        Ok(SubscriptionPaymentStatus {
+            transaction,
+            subscription: Some(subscription),
+        })
+    }
+}
+
+pub struct ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, C> {
+    transactions: &'a T,
+    subscriptions: &'a S,
+    clock: &'a C,
+}
+
+impl<'a, T, S, C> ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, C>
+where
+    T: PaymentTransactionRepository,
+    S: SubscriptionRepository,
+    C: Clock,
+{
+    pub const fn new(transactions: &'a T, subscriptions: &'a S, clock: &'a C) -> Self {
+        Self {
+            transactions,
+            subscriptions,
+            clock,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        payment_id: &PaymentId,
+        status: PaymentStatus,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        let mut transaction = self
+            .transactions
+            .find_payment_transaction(payment_id)
+            .await?
+            .ok_or_else(|| ApplicationError::NotFound {
+                entity: "payment_transaction",
+                id: payment_id.to_string(),
+            })?;
+        transaction.update_status(status, self.clock.now());
+        self.transactions
+            .save_payment_transaction(&transaction)
+            .await?;
+        CheckSubscriptionPaymentUseCase::new(self.transactions, self.subscriptions, self.clock)
+            .fulfill_if_succeeded(transaction)
+            .await
     }
 }

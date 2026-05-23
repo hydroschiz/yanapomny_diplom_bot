@@ -29,7 +29,8 @@ pub use ids::{
 };
 pub use intent::IntentLog;
 pub use payments::{
-    Currency, Money, Payment, PaymentProvider, PaymentStatus, PaymentTransaction, Tariff, TARIFFS,
+    tariff_for_months, Currency, Money, Payment, PaymentProvider, PaymentStatus,
+    PaymentTransaction, Tariff, TARIFFS,
 };
 pub use referral::Referral;
 pub use reminder::{Reminder, ReminderStatus, RetryPolicy};

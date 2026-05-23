@@ -184,14 +184,14 @@ pub fn pay_provider_keyboard(
 
 pub fn pay_link_keyboard(
     url: &str,
-    months: i32,
+    payment_id: &str,
     capabilities: TransportCapabilities,
 ) -> TransportKeyboard {
     KeyboardBuilder::new(capabilities).finish(vec![
         vec![TransportButton::url("💳 Карта, SberPay, ЮMoney", url)],
         vec![TransportButton::callback(
             "🔄 Проверить оплату",
-            format!("pay_check:{}", months),
+            format!("pay_check:{}", payment_id),
         )],
         vec![
             TransportButton::callback("⬅ Назад", "pay_menu"),
