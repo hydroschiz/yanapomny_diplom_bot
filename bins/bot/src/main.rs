@@ -442,12 +442,34 @@ impl BotHandler {
                 self.send_notification(callback.peer_id, Notification::Start)
                     .await
             }
-            _ => {
+            CallbackRoute::ShowReferral => {
                 self.send_text(
                     callback.peer_id,
-                    "Действие будет доступно в следующем шаге cutover.",
+                    "Реферальные ссылки VK временно отключены.",
                 )
                 .await
+            }
+            CallbackRoute::ConfirmText
+            | CallbackRoute::ConfirmReminder
+            | CallbackRoute::EditReminder => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(
+                    callback.peer_id,
+                    "Подтверждение напоминаний больше не используется. Отправьте текст заново, и я сразу создам напоминание.",
+                )
+                .await
+            }
+            CallbackRoute::CancelText => {
+                self.state_store
+                    .set_state(UserId::new(callback.user_id), DialogState::Idle)
+                    .await?;
+                self.send_text(callback.peer_id, "Действие отменено.").await
+            }
+            CallbackRoute::Unknown(_) => {
+                self.send_text(callback.peer_id, "Неизвестное действие.")
+                    .await
             }
         }
     }
