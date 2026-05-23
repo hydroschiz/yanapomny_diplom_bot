@@ -332,17 +332,19 @@ impl PaymentCachePort for InMemoryStore {
 
 #[async_trait]
 impl PaymentGatewayPort for InMemoryStore {
-    async fn create_payment(&self, transaction: &PaymentTransaction) -> ApplicationResult<String> {
+    async fn create_payment(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> ApplicationResult<(String, String)> {
         let mut state = self.state.lock().unwrap();
         let url = state
             .payment_confirmation_urls
             .entry(transaction.payment_id.clone())
             .or_insert_with(|| format!("https://pay.example/{}", transaction.payment_id));
-        Ok(url.clone())
+        Ok((transaction.payment_id.as_str().to_string(), url.clone()))
     }
 
     async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus> {
-        // For in-memory store, always return Pending (test stubs don't have real payments)
         let _ = payment_id;
         Ok(PaymentStatus::Pending)
     }

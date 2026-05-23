@@ -5,8 +5,8 @@ use domain::{
 };
 
 use crate::{
-    ApplicationError, ApplicationResult, Clock, IdGenerator, PaymentCachePort, PaymentGateway,
-    PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository, SubscriptionRepository,
+    ApplicationError, ApplicationResult, Clock, IdGenerator, PaymentCachePort, PaymentGatewayPort,
+    PaymentRepository, PaymentTransactionRepository, SubscriptionRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub struct CreatePaymentUseCase<'a, R, G, C> {
 impl<'a, R, G, C> CreatePaymentUseCase<'a, R, G, C>
 where
     R: PaymentRepository,
-    G: PaymentGateway,
+    G: PaymentGatewayPort,
     C: Clock,
 {
     pub const fn new(payments: &'a R, gateway: &'a G, clock: &'a C) -> Self {
@@ -53,7 +53,16 @@ where
             self.clock.now(),
         );
         self.payments.save_payment(&payment).await?;
-        let confirmation_url = self.gateway.create_payment(&payment).await?;
+
+        // Convert Payment to a minimal PaymentTransaction for gateway
+        let transaction = PaymentTransaction::new(
+            payment.id.clone(),
+            UserId::new(0), // Not used for simple payments
+            payment.amount,
+            None,
+            self.clock.now(),
+        );
+        let (_, confirmation_url) = self.gateway.create_payment(&transaction).await?;
         Ok(CreatedPayment {
             payment,
             confirmation_url,
@@ -157,7 +166,16 @@ where
         self.transactions
             .save_payment_transaction(&transaction)
             .await?;
-        let confirmation_url = self.gateway.create_payment(&transaction).await?;
+
+        let (provider_payment_id, confirmation_url) =
+            self.gateway.create_payment(&transaction).await?;
+
+        // Store the provider's payment ID so we can check status later
+        transaction.set_provider_payment_id(&provider_payment_id);
+        self.transactions
+            .save_payment_transaction(&transaction)
+            .await?;
+
         self.pending_cache
             .remember_pending_payment(&payment_id, command.user_id, now + Duration::minutes(30))
             .await?;
@@ -212,7 +230,15 @@ where
         // If transaction is not yet succeeded, check with payment gateway
         if transaction.status != PaymentStatus::Succeeded {
             if let Some(gateway) = self.gateway {
-                let gateway_status = gateway.get_payment_status(payment_id).await?;
+                // Use provider's payment_id if available (new flow),
+                // otherwise fall back to our payment_id (legacy compatibility)
+                let provider_id = transaction
+                    .provider_payment_id
+                    .as_ref()
+                    .map(|id| PaymentId::new(id.as_str()))
+                    .unwrap_or_else(|| payment_id.clone());
+
+                let gateway_status = gateway.get_payment_status(&provider_id).await?;
                 if gateway_status == PaymentStatus::Succeeded {
                     let now = self.clock.now();
                     transaction.update_status(gateway_status, now);

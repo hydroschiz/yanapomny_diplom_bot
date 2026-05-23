@@ -11,8 +11,8 @@ use application::{
     DeleteExternalChannelSubscriptionUseCase, DeliverDueRemindersUseCase, DeliveryEventRepository,
     DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, IdGenerator,
     InterpretedTask, ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
-    NaturalLanguageInterpreter, Notification, Notifier, PaymentCachePort, PaymentGateway,
-    PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
+    NaturalLanguageInterpreter, Notification, Notifier, PaymentCachePort, PaymentGatewayPort,
+    PaymentRepository, PaymentTransactionRepository,
     PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase,
     ProcessSubscriptionPaymentWebhookUseCase, ReferralRepository, ReminderActionCommand,
     ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
@@ -370,29 +370,44 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .confirmation_url
         .contains(subscription_payment.transaction.payment_id.as_str()));
 
-    let pending = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
-        .execute(&subscription_payment.transaction.payment_id)
-        .await
-        .unwrap();
+    let pending = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(
+        &store,
+        None::<&AppMemory>,
+        &store,
+        &store,
+    )
+    .execute(&subscription_payment.transaction.payment_id)
+    .await
+    .unwrap();
     assert!(pending.subscription.is_none());
 
-    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
-        .execute(
-            &subscription_payment.transaction.payment_id,
-            PaymentStatus::Succeeded,
-        )
-        .await
-        .unwrap();
+    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::<_, AppMemory, _, _>::new(
+        &store,
+        None::<&AppMemory>,
+        &store,
+        &store,
+    )
+    .execute(
+        &subscription_payment.transaction.payment_id,
+        PaymentStatus::Succeeded,
+    )
+    .await
+    .unwrap();
     let subscription = fulfilled.subscription.unwrap();
     assert!(fulfilled.transaction.fulfilled);
     assert_eq!(subscription.user_id, Some(user_id));
     assert_eq!(subscription.chat_id, ChatId::new(user_id.value()));
     assert!(subscription.expires_at > fixed_now());
 
-    let fulfilled_again = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(&store, None::<&AppMemory>, &store, &store)
-        .execute(&subscription_payment.transaction.payment_id)
-        .await
-        .unwrap();
+    let fulfilled_again = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(
+        &store,
+        None::<&AppMemory>,
+        &store,
+        &store,
+    )
+    .execute(&subscription_payment.transaction.payment_id)
+    .await
+    .unwrap();
     assert!(fulfilled_again.transaction.fulfilled);
     assert!(fulfilled_again.subscription.is_none());
 
@@ -800,13 +815,6 @@ impl PaymentRepository for AppMemory {
 }
 
 #[async_trait]
-impl PaymentGateway for AppMemory {
-    async fn create_payment(&self, payment: &Payment) -> application::ApplicationResult<String> {
-        Ok(format!("https://pay.example/{}", payment.id))
-    }
-}
-
-#[async_trait]
 impl PaymentTransactionRepository for AppMemory {
     async fn find_payment_transaction(
         &self,
@@ -856,8 +864,9 @@ impl PaymentGatewayPort for AppMemory {
     async fn create_payment(
         &self,
         transaction: &PaymentTransaction,
-    ) -> application::ApplicationResult<String> {
-        Ok(format!("https://pay.example/{}", transaction.payment_id))
+    ) -> application::ApplicationResult<(String, String)> {
+        let url = format!("https://pay.example/{}", transaction.payment_id);
+        Ok((transaction.payment_id.as_str().to_string(), url))
     }
 
     async fn get_payment_status(

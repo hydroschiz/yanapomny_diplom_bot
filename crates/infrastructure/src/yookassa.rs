@@ -1,6 +1,6 @@
-use application::{ApplicationError, ApplicationResult, PaymentGateway, PaymentGatewayPort};
+use application::{ApplicationError, ApplicationResult, PaymentGatewayPort};
 use async_trait::async_trait;
-use domain::{Currency, Money, Payment, PaymentId, PaymentStatus, PaymentTransaction, UserId};
+use domain::{Currency, Money, PaymentId, PaymentStatus, PaymentTransaction, UserId};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -99,7 +99,7 @@ impl HttpYooKassaPaymentGateway {
         idempotence_key: &str,
         metadata: Value,
         description: Option<String>,
-    ) -> ApplicationResult<String> {
+    ) -> ApplicationResult<CreatedPaymentResponse> {
         let amount_value = json!({
             "value": format!("{}.00", amount.amount),
             "currency": currency_code(amount.currency),
@@ -147,33 +147,33 @@ impl HttpYooKassaPaymentGateway {
             .json()
             .await
             .map_err(|err| ApplicationError::ExternalService(err.to_string()))?;
-        response.confirmation.confirmation_url.ok_or_else(|| {
+
+        let confirmation_url = response.confirmation.confirmation_url.ok_or_else(|| {
             ApplicationError::ExternalService(
                 "YooKassa response has no confirmation_url".to_string(),
             )
+        })?;
+
+        Ok(CreatedPaymentResponse {
+            payment_id: response.id,
+            confirmation_url,
         })
     }
 }
 
-#[async_trait]
-impl PaymentGateway for HttpYooKassaPaymentGateway {
-    async fn create_payment(&self, payment: &Payment) -> ApplicationResult<String> {
-        self.create_redirect_payment(
-            payment.amount,
-            None,
-            payment.id.as_str(),
-            json!({
-                "payment_id": payment.id.as_str(),
-            }),
-            None,
-        )
-        .await
-    }
+/// Response from YooKassa when creating a payment.
+#[derive(Debug)]
+struct CreatedPaymentResponse {
+    payment_id: String,
+    confirmation_url: String,
 }
 
 #[async_trait]
 impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
-    async fn create_payment(&self, transaction: &PaymentTransaction) -> ApplicationResult<String> {
+    async fn create_payment(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> ApplicationResult<(String, String)> {
         let mut metadata = json!({
             "payment_id": transaction.payment_id.as_str(),
             "user_id": transaction.user_id.to_string(),
@@ -185,17 +185,20 @@ impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
             .months
             .map(|months| format!("Подписка на {} мес.", months));
 
-        self.create_redirect_payment(
-            transaction.amount,
-            Some(transaction.user_id),
-            transaction
-                .idempotence_key
-                .as_deref()
-                .unwrap_or(transaction.payment_id.as_str()),
-            metadata,
-            description,
-        )
-        .await
+        let response = self
+            .create_redirect_payment(
+                transaction.amount,
+                Some(transaction.user_id),
+                transaction
+                    .idempotence_key
+                    .as_deref()
+                    .unwrap_or(transaction.payment_id.as_str()),
+                metadata,
+                description,
+            )
+            .await?;
+
+        Ok((response.payment_id, response.confirmation_url))
     }
 
     async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus> {
@@ -228,6 +231,7 @@ impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
 
 #[derive(Debug, Deserialize)]
 struct CreatePaymentResponse {
+    id: String,
     confirmation: ConfirmationResponse,
 }
 

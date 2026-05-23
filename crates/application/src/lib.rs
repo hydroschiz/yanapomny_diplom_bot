@@ -12,10 +12,10 @@ pub use ports::{
     ChannelSubscriptionRepository, Clock, DeliveryEventRepository, DialogState, DialogStateStore,
     ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
     NaturalLanguageInterpreter, NaturalLanguageReminderParser, Notification, Notifier,
-    PaymentCachePort, PaymentGateway, PaymentGatewayPort, PaymentRepository,
-    PaymentTransactionRepository, ProfileNotification, ReferralRepository,
-    ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
-    SubscriptionRepository, TaskRepository, UserPreferencesRepository, UserRepository,
+    PaymentCachePort, PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
+    ProfileNotification, ReferralRepository, ReminderPreferencesRepository, ReminderRepository,
+    StreamPlatformGateway, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
+    UserRepository,
 };
 pub use use_cases::{
     active_reminders, active_tasks, CancelReminderUseCase, CheckSubscriptionPaymentUseCase,

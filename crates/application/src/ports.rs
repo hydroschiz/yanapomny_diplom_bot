@@ -144,13 +144,11 @@ pub trait PaymentCachePort: Send + Sync {
 
 #[async_trait]
 pub trait PaymentGatewayPort: Send + Sync {
-    async fn create_payment(&self, transaction: &PaymentTransaction) -> ApplicationResult<String>;
+    async fn create_payment(
+        &self,
+        transaction: &PaymentTransaction,
+    ) -> ApplicationResult<(String, String)>;
     async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus>;
-}
-
-#[async_trait]
-pub trait PaymentGateway: Send + Sync {
-    async fn create_payment(&self, payment: &Payment) -> ApplicationResult<String>;
 }
 
 #[async_trait]

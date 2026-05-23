@@ -101,5 +101,5 @@ async fn in_memory_payment_adapters_store_transactions_and_pending_cache() {
         payment_id
     );
     assert_eq!(store.pending_payment(&payment_id).unwrap().user_id, user_id);
-    assert!(payment_url.contains(payment_id.as_str()));
+    assert!(payment_url.1.contains(payment_id.as_str()));
 }

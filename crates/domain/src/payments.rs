@@ -146,6 +146,8 @@ pub struct PaymentTransaction {
     pub fulfilled_at: Option<DateTime<Utc>>,
     pub idempotence_key: Option<String>,
     pub provider: Option<String>,
+    /// YooKassa's internal payment ID (separate from our generated payment_id)
+    pub provider_payment_id: Option<String>,
 }
 
 impl PaymentTransaction {
@@ -168,7 +170,12 @@ impl PaymentTransaction {
             fulfilled_at: None,
             idempotence_key: None,
             provider: None,
+            provider_payment_id: None,
         }
+    }
+
+    pub fn set_provider_payment_id(&mut self, id: impl Into<String>) {
+        self.provider_payment_id = Some(id.into());
     }
 
     pub fn update_status(&mut self, status: PaymentStatus, now: DateTime<Utc>) {
