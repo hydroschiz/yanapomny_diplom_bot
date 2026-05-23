@@ -12,12 +12,13 @@ use application::{
     DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, IdGenerator,
     InterpretedTask, ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
     NaturalLanguageInterpreter, Notification, Notifier, PaymentCachePort, PaymentGatewayPort,
-    PaymentRepository, PaymentTransactionRepository, PreviewReminderFromTextCommand,
-    PreviewReminderFromTextUseCase, ProcessSubscriptionPaymentWebhookUseCase, ReferralRepository,
-    ReminderActionCommand, ReminderPreferencesRepository, ReminderRepository,
-    SaveExternalChannelSubscriptionCommand, SaveExternalChannelSubscriptionUseCase,
-    SnoozeReminderUseCase, StreamPlatformGateway, SubscriptionRepository, TaskRepository,
-    UpdatePreferencesUseCase, UserPreferencesRepository, UserRepository,
+    PaymentRepository, PaymentTransactionRepository, PendingPayment,
+    PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase,
+    ProcessSubscriptionPaymentWebhookUseCase, ReferralRepository, ReminderActionCommand,
+    ReminderPreferencesRepository, ReminderRepository, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase, SnoozeReminderUseCase, StreamPlatformGateway,
+    SubscriptionRepository, TaskRepository, UpdatePreferencesUseCase, UserPreferencesRepository,
+    UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -362,12 +363,36 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
     assert_eq!(subscription_payment.transaction.amount, Money::rub(195));
     assert_eq!(subscription_payment.transaction.months, Some(Months::THREE));
     assert_eq!(
+        subscription_payment
+            .transaction
+            .provider_payment_id
+            .as_deref(),
+        Some("yk-subscription-payment-1")
+    );
+    assert_eq!(
         store.pending_payment_user(&subscription_payment.transaction.payment_id),
         Some(user_id)
     );
     assert!(subscription_payment
         .confirmation_url
         .contains(subscription_payment.transaction.payment_id.as_str()));
+
+    let reused_subscription_payment =
+        CreateSubscriptionPaymentUseCase::new(&store, &store, &store, &store, &store)
+            .execute(CreateSubscriptionPaymentCommand {
+                user_id,
+                months: Months::THREE,
+            })
+            .await
+            .unwrap();
+    assert_eq!(
+        reused_subscription_payment.transaction.payment_id,
+        subscription_payment.transaction.payment_id
+    );
+    assert_eq!(
+        reused_subscription_payment.confirmation_url,
+        subscription_payment.confirmation_url
+    );
 
     let pending = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(
         &store,
@@ -380,11 +405,23 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
     .unwrap();
     assert!(pending.subscription.is_none());
 
-    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::<_, AppMemory, _, _>::new(
-        &store,
-        None::<&AppMemory>,
-        &store,
-        &store,
+    let pending_with_gateway =
+        CheckSubscriptionPaymentUseCase::new(&store, Some(&store), &store, &store)
+            .execute(&subscription_payment.transaction.payment_id)
+            .await
+            .unwrap();
+    assert!(pending_with_gateway.subscription.is_none());
+    assert_eq!(
+        store.last_payment_status_check().as_ref(),
+        Some(&PaymentId::new("yk-subscription-payment-1"))
+    );
+
+    CreateReferralUseCase::new(&store, &store)
+        .execute(UserId::new(1), user_id)
+        .await
+        .unwrap();
+    let fulfilled = ProcessSubscriptionPaymentWebhookUseCase::new(
+        &store, &store, &store, &store, &store, &store,
     )
     .execute(
         &subscription_payment.transaction.payment_id,
@@ -397,6 +434,65 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
     assert_eq!(subscription.user_id, Some(user_id));
     assert_eq!(subscription.chat_id, ChatId::new(user_id.value()));
     assert!(subscription.expires_at > fixed_now());
+    assert!(store
+        .pending_payment_user(&subscription_payment.transaction.payment_id)
+        .is_none());
+    assert!(store.notifications().iter().any(|notification| matches!(
+        notification,
+        Notification::Text { chat_id, text }
+            if *chat_id == ChatId::new(user_id.value()) && text.contains("Спасибо за покупку")
+    )));
+    let referrer_subscription = store
+        .find_subscription(ChatId::new(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(referrer_subscription.user_id, Some(UserId::new(1)));
+    assert!(store.notifications().iter().any(|notification| matches!(
+        notification,
+        Notification::Text { chat_id, text }
+            if *chat_id == ChatId::new(1) && text.contains("Бонус по реферальной программе")
+    )));
+
+    let notification_count = store.notifications().len();
+    let fulfilled_duplicate = ProcessSubscriptionPaymentWebhookUseCase::new(
+        &store, &store, &store, &store, &store, &store,
+    )
+    .execute(
+        &subscription_payment.transaction.payment_id,
+        PaymentStatus::Succeeded,
+    )
+    .await
+    .unwrap();
+    assert!(fulfilled_duplicate.subscription.is_none());
+    assert_eq!(store.notifications().len(), notification_count);
+
+    let canceled_payment =
+        CreateSubscriptionPaymentUseCase::new(&store, &store, &store, &store, &store)
+            .execute(CreateSubscriptionPaymentCommand {
+                user_id: UserId::new(8),
+                months: Months::SIX,
+            })
+            .await
+            .unwrap();
+    let canceled = ProcessSubscriptionPaymentWebhookUseCase::new(
+        &store, &store, &store, &store, &store, &store,
+    )
+    .execute(
+        &canceled_payment.transaction.payment_id,
+        PaymentStatus::Canceled,
+    )
+    .await
+    .unwrap();
+    assert_eq!(canceled.transaction.status, PaymentStatus::Canceled);
+    assert!(store
+        .pending_payment_user(&canceled_payment.transaction.payment_id)
+        .is_none());
+    assert!(store.notifications().iter().any(|notification| matches!(
+        notification,
+        Notification::Text { chat_id, text }
+            if *chat_id == ChatId::new(8) && text.contains("Оплата отменена")
+    )));
 
     let fulfilled_again = CheckSubscriptionPaymentUseCase::<_, AppMemory, _, _>::new(
         &store,
@@ -473,16 +569,11 @@ async fn payment_channel_referral_and_preferences_use_cases_work() {
         .unwrap()
         .is_empty());
 
-    let referral = CreateReferralUseCase::new(&store, &store)
-        .execute(UserId::new(1), user_id)
-        .await
-        .unwrap();
-    assert!(!referral.is_rewarded());
     assert!(ConsumeReferralRewardUseCase::new(&store, &store)
         .execute(UserId::new(1), user_id)
         .await
         .unwrap()
-        .is_some());
+        .is_none());
     assert!(ConsumeReferralRewardUseCase::new(&store, &store)
         .execute(UserId::new(1), user_id)
         .await
@@ -502,7 +593,11 @@ struct AppState {
     next_event_id: i64,
     payments: HashMap<PaymentId, Payment>,
     payment_transactions: HashMap<PaymentId, PaymentTransaction>,
-    pending_payments: HashMap<PaymentId, UserId>,
+    pending_payments: HashMap<PaymentId, PendingPayment>,
+    pending_payments_by_user: HashMap<UserId, PaymentId>,
+    payment_notifications: HashMap<(PaymentId, String), DateTime<Utc>>,
+    payment_locks: HashMap<PaymentId, DateTime<Utc>>,
+    last_payment_status_check: Option<PaymentId>,
     next_payment_id: i64,
     subscriptions: HashMap<ChatId, Subscription>,
     channels: HashMap<UserId, Vec<ChannelSubscription>>,
@@ -572,7 +667,11 @@ impl AppMemory {
             .unwrap()
             .pending_payments
             .get(payment_id)
-            .copied()
+            .map(|payment| payment.user_id)
+    }
+
+    fn last_payment_status_check(&self) -> Option<PaymentId> {
+        self.state.lock().unwrap().last_payment_status_check.clone()
     }
 }
 
@@ -828,6 +927,22 @@ impl PaymentTransactionRepository for AppMemory {
             .cloned())
     }
 
+    async fn find_payment_transaction_by_provider_payment_id(
+        &self,
+        provider_payment_id: &str,
+    ) -> application::ApplicationResult<Option<PaymentTransaction>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .payment_transactions
+            .values()
+            .find(|transaction| {
+                transaction.provider_payment_id.as_deref() == Some(provider_payment_id)
+            })
+            .cloned())
+    }
+
     async fn save_payment_transaction(
         &self,
         transaction: &PaymentTransaction,
@@ -843,17 +958,85 @@ impl PaymentTransactionRepository for AppMemory {
 
 #[async_trait]
 impl PaymentCachePort for AppMemory {
+    async fn pending_payment_for_user(
+        &self,
+        user_id: UserId,
+    ) -> application::ApplicationResult<Option<PendingPayment>> {
+        let state = self.state.lock().unwrap();
+        let Some(payment_id) = state.pending_payments_by_user.get(&user_id) else {
+            return Ok(None);
+        };
+        Ok(state.pending_payments.get(payment_id).cloned())
+    }
+
     async fn remember_pending_payment(
         &self,
-        payment_id: &PaymentId,
-        user_id: UserId,
-        _expires_at: DateTime<Utc>,
+        payment: &PendingPayment,
     ) -> application::ApplicationResult<()> {
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        state
+            .pending_payments_by_user
+            .insert(payment.user_id, payment.payment_id.clone());
+        state
             .pending_payments
-            .insert(payment_id.clone(), user_id);
+            .insert(payment.payment_id.clone(), payment.clone());
+        Ok(())
+    }
+
+    async fn refresh_pending_payment(
+        &self,
+        payment: &PendingPayment,
+        expires_at: DateTime<Utc>,
+    ) -> application::ApplicationResult<()> {
+        let mut payment = payment.clone();
+        payment.expires_at = expires_at;
+        self.remember_pending_payment(&payment).await
+    }
+
+    async fn delete_pending_payment(
+        &self,
+        payment_id: &PaymentId,
+    ) -> application::ApplicationResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(payment) = state.pending_payments.remove(payment_id) {
+            state.pending_payments_by_user.remove(&payment.user_id);
+        }
+        Ok(())
+    }
+
+    async fn notify_once(
+        &self,
+        payment_id: &PaymentId,
+        event: &str,
+        expires_at: DateTime<Utc>,
+    ) -> application::ApplicationResult<bool> {
+        let mut state = self.state.lock().unwrap();
+        let key = (payment_id.clone(), event.to_string());
+        if state.payment_notifications.contains_key(&key) {
+            return Ok(false);
+        }
+        state.payment_notifications.insert(key, expires_at);
+        Ok(true)
+    }
+
+    async fn try_acquire_fulfill_lock(
+        &self,
+        payment_id: &PaymentId,
+        expires_at: DateTime<Utc>,
+    ) -> application::ApplicationResult<bool> {
+        let mut state = self.state.lock().unwrap();
+        if state.payment_locks.contains_key(payment_id) {
+            return Ok(false);
+        }
+        state.payment_locks.insert(payment_id.clone(), expires_at);
+        Ok(true)
+    }
+
+    async fn release_fulfill_lock(
+        &self,
+        payment_id: &PaymentId,
+    ) -> application::ApplicationResult<()> {
+        self.state.lock().unwrap().payment_locks.remove(payment_id);
         Ok(())
     }
 }
@@ -865,14 +1048,14 @@ impl PaymentGatewayPort for AppMemory {
         transaction: &PaymentTransaction,
     ) -> application::ApplicationResult<(String, String)> {
         let url = format!("https://pay.example/{}", transaction.payment_id);
-        Ok((transaction.payment_id.as_str().to_string(), url))
+        Ok((format!("yk-{}", transaction.payment_id.as_str()), url))
     }
 
     async fn get_payment_status(
         &self,
         payment_id: &PaymentId,
     ) -> application::ApplicationResult<PaymentStatus> {
-        let _ = payment_id;
+        self.state.lock().unwrap().last_payment_status_check = Some(payment_id.clone());
         Ok(PaymentStatus::Pending)
     }
 }
@@ -991,6 +1174,20 @@ impl ReferralRepository for AppMemory {
             .unwrap()
             .referrals
             .get(&(referrer_id, invited_id))
+            .cloned())
+    }
+
+    async fn find_referral_by_invited(
+        &self,
+        invited_id: UserId,
+    ) -> application::ApplicationResult<Option<domain::Referral>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .referrals
+            .values()
+            .find(|referral| referral.invited_id == invited_id)
             .cloned())
     }
 

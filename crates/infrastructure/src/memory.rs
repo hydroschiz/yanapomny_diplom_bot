@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Mutex};
 use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DialogState,
     DialogStateStore, ExternalChannelSubscriptionRepository, NaturalLanguageReminderParser,
-    PaymentCachePort, PaymentGatewayPort, PaymentTransactionRepository, ReferralRepository,
-    ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
+    PaymentCachePort, PaymentGatewayPort, PaymentTransactionRepository, PendingPayment,
+    ReferralRepository, ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
     SubscriptionRepository, UserRepository,
 };
 use async_trait::async_trait;
@@ -18,6 +18,8 @@ use domain::{
 pub struct InMemoryPendingPayment {
     pub payment_id: PaymentId,
     pub user_id: UserId,
+    pub months: Option<domain::Months>,
+    pub confirmation_url: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -30,6 +32,9 @@ struct InMemoryState {
     referrals: HashMap<(UserId, UserId), Referral>,
     payment_transactions: HashMap<PaymentId, PaymentTransaction>,
     pending_payments: HashMap<PaymentId, InMemoryPendingPayment>,
+    pending_payments_by_user: HashMap<UserId, PaymentId>,
+    payment_notifications: HashMap<(PaymentId, String), DateTime<Utc>>,
+    payment_locks: HashMap<PaymentId, DateTime<Utc>>,
     dialog_states: HashMap<UserId, DialogState>,
     parsed_schedules: HashMap<(UserId, String), Schedule>,
     latest_content: HashMap<String, Option<String>>,
@@ -273,6 +278,20 @@ impl ReferralRepository for InMemoryStore {
             .cloned())
     }
 
+    async fn find_referral_by_invited(
+        &self,
+        invited_id: UserId,
+    ) -> ApplicationResult<Option<Referral>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .referrals
+            .values()
+            .find(|referral| referral.invited_id == invited_id)
+            .cloned())
+    }
+
     async fn save_referral(&self, referral: &Referral) -> ApplicationResult<()> {
         self.state.lock().unwrap().referrals.insert(
             (referral.referrer_id, referral.invited_id),
@@ -297,6 +316,22 @@ impl PaymentTransactionRepository for InMemoryStore {
             .cloned())
     }
 
+    async fn find_payment_transaction_by_provider_payment_id(
+        &self,
+        provider_payment_id: &str,
+    ) -> ApplicationResult<Option<PaymentTransaction>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .payment_transactions
+            .values()
+            .find(|transaction| {
+                transaction.provider_payment_id.as_deref() == Some(provider_payment_id)
+            })
+            .cloned())
+    }
+
     async fn save_payment_transaction(
         &self,
         transaction: &PaymentTransaction,
@@ -312,20 +347,91 @@ impl PaymentTransactionRepository for InMemoryStore {
 
 #[async_trait]
 impl PaymentCachePort for InMemoryStore {
-    async fn remember_pending_payment(
+    async fn pending_payment_for_user(
         &self,
-        payment_id: &PaymentId,
         user_id: UserId,
-        expires_at: DateTime<Utc>,
-    ) -> ApplicationResult<()> {
-        self.state.lock().unwrap().pending_payments.insert(
-            payment_id.clone(),
+    ) -> ApplicationResult<Option<PendingPayment>> {
+        let state = self.state.lock().unwrap();
+        let Some(payment_id) = state.pending_payments_by_user.get(&user_id) else {
+            return Ok(None);
+        };
+        Ok(state.pending_payments.get(payment_id).map(|payment| {
+            PendingPayment::new(
+                payment.payment_id.clone(),
+                payment.user_id,
+                payment.months,
+                payment.confirmation_url.clone(),
+                payment.expires_at,
+            )
+        }))
+    }
+
+    async fn remember_pending_payment(&self, payment: &PendingPayment) -> ApplicationResult<()> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .pending_payments_by_user
+            .insert(payment.user_id, payment.payment_id.clone());
+        state.pending_payments.insert(
+            payment.payment_id.clone(),
             InMemoryPendingPayment {
-                payment_id: payment_id.clone(),
-                user_id,
-                expires_at,
+                payment_id: payment.payment_id.clone(),
+                user_id: payment.user_id,
+                months: payment.months,
+                confirmation_url: payment.confirmation_url.clone(),
+                expires_at: payment.expires_at,
             },
         );
+        Ok(())
+    }
+
+    async fn refresh_pending_payment(
+        &self,
+        payment: &PendingPayment,
+        expires_at: DateTime<Utc>,
+    ) -> ApplicationResult<()> {
+        let mut payment = payment.clone();
+        payment.expires_at = expires_at;
+        self.remember_pending_payment(&payment).await
+    }
+
+    async fn delete_pending_payment(&self, payment_id: &PaymentId) -> ApplicationResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(payment) = state.pending_payments.remove(payment_id) {
+            state.pending_payments_by_user.remove(&payment.user_id);
+        }
+        Ok(())
+    }
+
+    async fn notify_once(
+        &self,
+        payment_id: &PaymentId,
+        event: &str,
+        expires_at: DateTime<Utc>,
+    ) -> ApplicationResult<bool> {
+        let mut state = self.state.lock().unwrap();
+        let key = (payment_id.clone(), event.to_string());
+        if state.payment_notifications.contains_key(&key) {
+            return Ok(false);
+        }
+        state.payment_notifications.insert(key, expires_at);
+        Ok(true)
+    }
+
+    async fn try_acquire_fulfill_lock(
+        &self,
+        payment_id: &PaymentId,
+        expires_at: DateTime<Utc>,
+    ) -> ApplicationResult<bool> {
+        let mut state = self.state.lock().unwrap();
+        if state.payment_locks.contains_key(payment_id) {
+            return Ok(false);
+        }
+        state.payment_locks.insert(payment_id.clone(), expires_at);
+        Ok(true)
+    }
+
+    async fn release_fulfill_lock(&self, payment_id: &PaymentId) -> ApplicationResult<()> {
+        self.state.lock().unwrap().payment_locks.remove(payment_id);
         Ok(())
     }
 }

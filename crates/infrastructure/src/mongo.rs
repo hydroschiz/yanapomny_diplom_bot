@@ -658,6 +658,18 @@ impl PaymentTransactionRepository for MongoStore {
         dto.map(PaymentDto::try_into_transaction).transpose()
     }
 
+    async fn find_payment_transaction_by_provider_payment_id(
+        &self,
+        provider_payment_id: &str,
+    ) -> ApplicationResult<Option<PaymentTransaction>> {
+        let dto = self
+            .payments()
+            .find_one(doc! { "provider_payment_id": provider_payment_id }, None)
+            .await
+            .map_err(repo_err)?;
+        dto.map(PaymentDto::try_into_transaction).transpose()
+    }
+
     async fn save_payment_transaction(
         &self,
         transaction: &PaymentTransaction,
@@ -688,6 +700,9 @@ impl PaymentTransactionRepository for MongoStore {
         if let Some(provider) = dto.provider.clone() {
             set.insert("provider", provider);
         }
+        if let Some(provider_payment_id) = dto.provider_payment_id.clone() {
+            set.insert("provider_payment_id", provider_payment_id);
+        }
 
         self.payments()
             .update_one(
@@ -714,6 +729,18 @@ impl ReferralRepository for MongoStore {
                 doc! { "referrer_user_id": referrer_id.value(), "invited_user_id": invited_id.value() },
                 None,
             )
+            .await
+            .map_err(repo_err)?;
+        dto.map(TryInto::try_into).transpose()
+    }
+
+    async fn find_referral_by_invited(
+        &self,
+        invited_id: UserId,
+    ) -> ApplicationResult<Option<Referral>> {
+        let dto = self
+            .referrals()
+            .find_one(doc! { "invited_user_id": invited_id.value() }, None)
             .await
             .map_err(repo_err)?;
         dto.map(TryInto::try_into).transpose()
@@ -2316,6 +2343,7 @@ mod tests {
         );
         transaction.idempotence_key = Some("idem-1".to_string());
         transaction.provider = Some("yookassa".to_string());
+        transaction.provider_payment_id = Some("yk-payment-1".to_string());
         transaction.mark_fulfilled(now);
 
         let dto = PaymentDto::from_transaction(transaction.clone());
@@ -2325,10 +2353,18 @@ mod tests {
         assert_eq!(document.get_str("_id").unwrap(), "payment-1");
         assert_eq!(document.get_i64("user_id").unwrap(), 7);
         assert_eq!(document.get_i32("months").unwrap(), 3);
+        assert_eq!(
+            document.get_str("provider_payment_id").unwrap(),
+            "yk-payment-1"
+        );
         assert!(!document.contains_key("id"));
         assert_eq!(restored.payment_id, transaction.payment_id);
         assert_eq!(restored.user_id, transaction.user_id);
         assert_eq!(restored.months, transaction.months);
+        assert_eq!(
+            restored.provider_payment_id,
+            Some("yk-payment-1".to_string())
+        );
         assert!(restored.fulfilled);
     }
 

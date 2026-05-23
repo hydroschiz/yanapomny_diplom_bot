@@ -13,9 +13,9 @@ pub use ports::{
     ExternalChannelSubscriptionRepository, IdGenerator, InterpretedTask,
     NaturalLanguageInterpreter, NaturalLanguageReminderParser, Notification, Notifier,
     PaymentCachePort, PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
-    ProfileNotification, ReferralRepository, ReminderPreferencesRepository, ReminderRepository,
-    StreamPlatformGateway, SubscriptionRepository, TaskRepository, UserPreferencesRepository,
-    UserRepository,
+    PendingPayment, ProfileNotification, ReferralRepository, ReminderPreferencesRepository,
+    ReminderRepository, StreamPlatformGateway, SubscriptionRepository, TaskRepository,
+    UserPreferencesRepository, UserRepository,
 };
 pub use use_cases::{
     active_reminders, active_tasks, CancelReminderUseCase, CheckSubscriptionPaymentUseCase,

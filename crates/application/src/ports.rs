@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{
-    ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Payment, PaymentId,
-    PaymentStatus, PaymentTransaction, Referral, Reminder, ReminderId, Schedule, Subscription,
-    Task, TaskId, TimePreferences, User, UserId, UserPreferences,
+    ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Months, Payment,
+    PaymentId, PaymentStatus, PaymentTransaction, Referral, Reminder, ReminderId, Schedule,
+    Subscription, Task, TaskId, TimePreferences, User, UserId, UserPreferences,
 };
 
 use crate::ApplicationResult;
@@ -111,6 +111,10 @@ pub trait ReferralRepository: Send + Sync {
         referrer_id: UserId,
         invited_id: UserId,
     ) -> ApplicationResult<Option<Referral>>;
+    async fn find_referral_by_invited(
+        &self,
+        invited_id: UserId,
+    ) -> ApplicationResult<Option<Referral>>;
     async fn save_referral(&self, referral: &Referral) -> ApplicationResult<()>;
 }
 
@@ -119,6 +123,10 @@ pub trait PaymentTransactionRepository: Send + Sync {
     async fn find_payment_transaction(
         &self,
         payment_id: &PaymentId,
+    ) -> ApplicationResult<Option<PaymentTransaction>>;
+    async fn find_payment_transaction_by_provider_payment_id(
+        &self,
+        provider_payment_id: &str,
     ) -> ApplicationResult<Option<PaymentTransaction>>;
     async fn save_payment_transaction(
         &self,
@@ -134,12 +142,56 @@ pub trait PaymentRepository: Send + Sync {
 
 #[async_trait]
 pub trait PaymentCachePort: Send + Sync {
-    async fn remember_pending_payment(
+    async fn pending_payment_for_user(
         &self,
-        payment_id: &PaymentId,
         user_id: UserId,
+    ) -> ApplicationResult<Option<PendingPayment>>;
+    async fn remember_pending_payment(&self, payment: &PendingPayment) -> ApplicationResult<()>;
+    async fn refresh_pending_payment(
+        &self,
+        payment: &PendingPayment,
         expires_at: DateTime<Utc>,
     ) -> ApplicationResult<()>;
+    async fn delete_pending_payment(&self, payment_id: &PaymentId) -> ApplicationResult<()>;
+    async fn notify_once(
+        &self,
+        payment_id: &PaymentId,
+        event: &str,
+        expires_at: DateTime<Utc>,
+    ) -> ApplicationResult<bool>;
+    async fn try_acquire_fulfill_lock(
+        &self,
+        payment_id: &PaymentId,
+        expires_at: DateTime<Utc>,
+    ) -> ApplicationResult<bool>;
+    async fn release_fulfill_lock(&self, payment_id: &PaymentId) -> ApplicationResult<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPayment {
+    pub payment_id: PaymentId,
+    pub user_id: UserId,
+    pub months: Option<Months>,
+    pub confirmation_url: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl PendingPayment {
+    pub fn new(
+        payment_id: PaymentId,
+        user_id: UserId,
+        months: Option<Months>,
+        confirmation_url: impl Into<String>,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            payment_id,
+            user_id,
+            months,
+            confirmation_url: confirmation_url.into(),
+            expires_at,
+        }
+    }
 }
 
 #[async_trait]

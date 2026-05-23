@@ -1,14 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-
 use anyhow::{Context, Result};
-use application::ProcessSubscriptionPaymentWebhookUseCase;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
-use domain::{PaymentId, PaymentStatus};
-use infrastructure::{HttpYooKassaPaymentGateway, MongoStore, SystemClock};
-use serde::Deserialize;
-use serde_json::Value;
-use tokio::net::TcpListener;
+use infrastructure::{MongoStore, RedisPaymentCache};
 use tracing::{error, info};
+use transport_vk::VkTransport;
+use webhook::spawn_yookassa_webhook_server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,97 +11,28 @@ async fn main() -> Result<()> {
 
     let config = WebhookConfig::from_env()?;
     let store = MongoStore::connect(&config.mongo_uri, &config.mongo_db).await?;
-    let state = Arc::new(AppState {
-        store,
-        clock: SystemClock,
-    });
-    let app = Router::new()
-        .route("/yookassa", post(yookassa_webhook))
-        .with_state(state);
-    let addr: SocketAddr = format!("{}:{}", config.bind_ip, config.port)
-        .parse()
-        .context("invalid webhook bind address")?;
-    let listener = TcpListener::bind(addr).await?;
+    let payment_cache = RedisPaymentCache::new(&config.redis_url)?;
+    let transport = VkTransport::new(config.vk_access_token.clone())?;
 
-    info!(%addr, "starting YooKassa webhook service");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    spawn_yookassa_webhook_server(
+        &config.bind_ip,
+        config.port,
+        store,
+        payment_cache,
+        transport,
+    )
+    .await?;
+    shutdown_signal().await;
 
     Ok(())
-}
-
-#[derive(Clone)]
-struct AppState {
-    store: MongoStore,
-    clock: SystemClock,
-}
-
-#[derive(Debug, Deserialize)]
-struct YooKassaWebhook {
-    event: String,
-    object: YooKassaPaymentObject,
-}
-
-#[derive(Debug, Deserialize)]
-struct YooKassaPaymentObject {
-    id: String,
-    status: String,
-    #[serde(default)]
-    metadata: HashMap<String, Value>,
-}
-
-async fn yookassa_webhook(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<YooKassaWebhook>,
-) -> StatusCode {
-    let payment_id =
-        metadata_string(&payload.object.metadata, "payment_id").unwrap_or(payload.object.id);
-    let status = yookassa_status(&payload.object.status, &payload.event);
-    let payment_id = PaymentId::new(payment_id);
-    let use_case = ProcessSubscriptionPaymentWebhookUseCase::<
-        MongoStore,
-        HttpYooKassaPaymentGateway,
-        _,
-        _,
-    >::new(&state.store, None, &state.store, &state.clock);
-
-    match use_case.execute(&payment_id, status).await {
-        Ok(payment) => {
-            info!(payment_id = %payment.transaction.payment_id, "processed YooKassa webhook");
-            StatusCode::OK
-        }
-        Err(error) => {
-            error!(%error, "failed to process YooKassa webhook");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-fn metadata_string(metadata: &HashMap<String, Value>, key: &str) -> Option<String> {
-    metadata.get(key).and_then(|value| {
-        value
-            .as_str()
-            .map(ToString::to_string)
-            .or_else(|| value.as_i64().map(|value| value.to_string()))
-    })
-}
-
-fn yookassa_status(status: &str, event: &str) -> PaymentStatus {
-    match status {
-        "pending" => PaymentStatus::Pending,
-        "waiting_for_capture" => PaymentStatus::WaitingForCapture,
-        "succeeded" => PaymentStatus::Succeeded,
-        "canceled" => PaymentStatus::Canceled,
-        _ if event == "payment.canceled" => PaymentStatus::Canceled,
-        other => PaymentStatus::Unknown(other.to_string()),
-    }
 }
 
 #[derive(Debug, Clone)]
 struct WebhookConfig {
     mongo_uri: String,
     mongo_db: String,
+    redis_url: String,
+    vk_access_token: String,
     bind_ip: String,
     port: u16,
 }
@@ -117,6 +42,8 @@ impl WebhookConfig {
         Ok(Self {
             mongo_uri: required_env("MONGO_URI")?,
             mongo_db: env_or("MONGO_DB", "tgBot"),
+            redis_url: required_env("REDIS_URL")?,
+            vk_access_token: required_env("VK_ACCESS_TOKEN")?,
             bind_ip: env_or("IP", "0.0.0.0"),
             port: env_parse("PORT", 3001)?,
         })

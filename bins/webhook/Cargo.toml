@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 application = { workspace = true }
+async-trait = { workspace = true }
 axum = "0.8"
 domain = { workspace = true }
 dotenvy = "0.15"
@@ -20,3 +21,5 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+transport-core = { workspace = true }
+transport-vk = { workspace = true }

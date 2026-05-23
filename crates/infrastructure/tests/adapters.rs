@@ -1,7 +1,7 @@
 use application::{
     Clock, DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase,
     IdGenerator, PaymentCachePort, PaymentGatewayPort, PaymentTransactionRepository,
-    SubscriptionRepository, UserRepository,
+    PendingPayment, SubscriptionRepository, UserRepository,
 };
 use chrono::{Duration, Utc};
 use domain::{ChatId, Money, Months, PaymentId, PaymentTransaction, SubscriptionPolicy, UserId};
@@ -86,7 +86,13 @@ async fn in_memory_payment_adapters_store_transactions_and_pending_cache() {
 
     store.save_payment_transaction(&transaction).await.unwrap();
     store
-        .remember_pending_payment(&payment_id, user_id, now + Duration::minutes(15))
+        .remember_pending_payment(&PendingPayment::new(
+            payment_id.clone(),
+            user_id,
+            Some(Months::THREE),
+            "https://pay.example/payment-1",
+            now + Duration::minutes(15),
+        ))
         .await
         .unwrap();
     let payment_url = store.create_payment(&transaction).await.unwrap();

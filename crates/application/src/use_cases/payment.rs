@@ -5,8 +5,9 @@ use domain::{
 };
 
 use crate::{
-    ApplicationError, ApplicationResult, Clock, IdGenerator, PaymentCachePort, PaymentGatewayPort,
-    PaymentRepository, PaymentTransactionRepository, SubscriptionRepository,
+    ApplicationError, ApplicationResult, Clock, IdGenerator, Notification, Notifier,
+    PaymentCachePort, PaymentGatewayPort, PaymentRepository, PaymentTransactionRepository,
+    PendingPayment, ReferralRepository, SubscriptionRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +154,34 @@ where
             ApplicationError::Conflict(format!("unsupported tariff: {} months", command.months))
         })?;
         let now = self.clock.now();
+        let expires_at = now + Duration::minutes(30);
+
+        if let Some(pending) = self
+            .pending_cache
+            .pending_payment_for_user(command.user_id)
+            .await?
+        {
+            if pending.months == Some(command.months) {
+                if let Some(transaction) = self
+                    .transactions
+                    .find_payment_transaction(&pending.payment_id)
+                    .await?
+                {
+                    self.pending_cache
+                        .refresh_pending_payment(&pending, expires_at)
+                        .await?;
+                    return Ok(CreatedSubscriptionPayment {
+                        transaction,
+                        confirmation_url: pending.confirmation_url,
+                    });
+                }
+            }
+
+            self.pending_cache
+                .delete_pending_payment(&pending.payment_id)
+                .await?;
+        }
+
         let payment_id = self.ids.new_payment_id();
         let mut transaction = PaymentTransaction::new(
             payment_id.clone(),
@@ -177,7 +206,13 @@ where
             .await?;
 
         self.pending_cache
-            .remember_pending_payment(&payment_id, command.user_id, now + Duration::minutes(30))
+            .remember_pending_payment(&PendingPayment::new(
+                payment_id,
+                command.user_id,
+                Some(command.months),
+                confirmation_url.clone(),
+                expires_at,
+            ))
             .await?;
 
         Ok(CreatedSubscriptionPayment {
@@ -305,30 +340,38 @@ where
     }
 }
 
-pub struct ProcessSubscriptionPaymentWebhookUseCase<'a, T, G, S, C> {
+pub struct ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, P, R, N, C> {
     transactions: &'a T,
-    gateway: Option<&'a G>,
     subscriptions: &'a S,
+    payment_cache: &'a P,
+    referrals: &'a R,
+    notifier: &'a N,
     clock: &'a C,
 }
 
-impl<'a, T, G, S, C> ProcessSubscriptionPaymentWebhookUseCase<'a, T, G, S, C>
+impl<'a, T, S, P, R, N, C> ProcessSubscriptionPaymentWebhookUseCase<'a, T, S, P, R, N, C>
 where
     T: PaymentTransactionRepository,
-    G: PaymentGatewayPort,
     S: SubscriptionRepository,
+    P: PaymentCachePort,
+    R: ReferralRepository,
+    N: Notifier,
     C: Clock,
 {
     pub const fn new(
         transactions: &'a T,
-        gateway: Option<&'a G>,
         subscriptions: &'a S,
+        payment_cache: &'a P,
+        referrals: &'a R,
+        notifier: &'a N,
         clock: &'a C,
     ) -> Self {
         Self {
             transactions,
-            gateway,
             subscriptions,
+            payment_cache,
+            referrals,
+            notifier,
             clock,
         }
     }
@@ -338,25 +381,253 @@ where
         payment_id: &PaymentId,
         status: PaymentStatus,
     ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        self.execute_with_provider_payment_id(payment_id, None, status)
+            .await
+    }
+
+    pub async fn execute_with_provider_payment_id(
+        &self,
+        payment_id: &PaymentId,
+        provider_payment_id: Option<&str>,
+        status: PaymentStatus,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
         let mut transaction = self
-            .transactions
-            .find_payment_transaction(payment_id)
-            .await?
-            .ok_or_else(|| ApplicationError::NotFound {
-                entity: "payment_transaction",
-                id: payment_id.to_string(),
-            })?;
-        transaction.update_status(status, self.clock.now());
+            .load_transaction(payment_id, provider_payment_id)
+            .await?;
+
+        if transaction.provider_payment_id.is_none() {
+            if let Some(provider_payment_id) = provider_payment_id {
+                transaction.set_provider_payment_id(provider_payment_id);
+            }
+        }
+
+        transaction.update_status(status.clone(), self.clock.now());
         self.transactions
             .save_payment_transaction(&transaction)
             .await?;
-        CheckSubscriptionPaymentUseCase::new(
-            self.transactions,
-            self.gateway,
-            self.subscriptions,
-            self.clock,
-        )
-        .fulfill_if_succeeded(transaction)
-        .await
+
+        let event = payment_status_event(&status);
+        if !self
+            .payment_cache
+            .notify_once(
+                &transaction.payment_id,
+                event,
+                self.clock.now() + Duration::hours(24),
+            )
+            .await?
+        {
+            return Ok(SubscriptionPaymentStatus {
+                transaction,
+                subscription: None,
+            });
+        }
+
+        match status {
+            PaymentStatus::Succeeded => self.fulfill_succeeded(transaction).await,
+            PaymentStatus::Canceled | PaymentStatus::Failed => {
+                self.payment_cache
+                    .delete_pending_payment(&transaction.payment_id)
+                    .await?;
+                self.notify_payment_canceled(transaction.user_id).await?;
+                Ok(SubscriptionPaymentStatus {
+                    transaction,
+                    subscription: None,
+                })
+            }
+            PaymentStatus::WaitingForCapture => {
+                self.notify_payment_waiting(transaction.user_id).await?;
+                Ok(SubscriptionPaymentStatus {
+                    transaction,
+                    subscription: None,
+                })
+            }
+            PaymentStatus::Pending | PaymentStatus::Unknown(_) => Ok(SubscriptionPaymentStatus {
+                transaction,
+                subscription: None,
+            }),
+        }
+    }
+
+    async fn load_transaction(
+        &self,
+        payment_id: &PaymentId,
+        provider_payment_id: Option<&str>,
+    ) -> ApplicationResult<PaymentTransaction> {
+        if let Some(transaction) = self
+            .transactions
+            .find_payment_transaction(payment_id)
+            .await?
+        {
+            return Ok(transaction);
+        }
+
+        if let Some(provider_payment_id) = provider_payment_id {
+            if let Some(transaction) = self
+                .transactions
+                .find_payment_transaction_by_provider_payment_id(provider_payment_id)
+                .await?
+            {
+                return Ok(transaction);
+            }
+        }
+
+        Err(ApplicationError::NotFound {
+            entity: "payment_transaction",
+            id: payment_id.to_string(),
+        })
+    }
+
+    async fn fulfill_succeeded(
+        &self,
+        transaction: PaymentTransaction,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        let lock_until = self.clock.now() + Duration::minutes(10);
+        if !self
+            .payment_cache
+            .try_acquire_fulfill_lock(&transaction.payment_id, lock_until)
+            .await?
+        {
+            return Ok(SubscriptionPaymentStatus {
+                transaction,
+                subscription: None,
+            });
+        }
+
+        let payment_id = transaction.payment_id.clone();
+        let result = self.fulfill_succeeded_locked(transaction).await;
+        let _ = self.payment_cache.release_fulfill_lock(&payment_id).await;
+
+        result
+    }
+
+    async fn fulfill_succeeded_locked(
+        &self,
+        mut transaction: PaymentTransaction,
+    ) -> ApplicationResult<SubscriptionPaymentStatus> {
+        self.payment_cache
+            .delete_pending_payment(&transaction.payment_id)
+            .await?;
+
+        if transaction.fulfilled {
+            return Ok(SubscriptionPaymentStatus {
+                transaction,
+                subscription: None,
+            });
+        }
+
+        let Some(months) = transaction.months else {
+            return Err(ApplicationError::Conflict(
+                "payment transaction has no subscription period".to_string(),
+            ));
+        };
+
+        let now = self.clock.now();
+        let chat_id = ChatId::new(transaction.user_id.value());
+        let mut subscription = self
+            .subscriptions
+            .find_subscription(chat_id)
+            .await?
+            .unwrap_or_else(|| {
+                Subscription::new_trial(chat_id, now, SubscriptionPolicy { trial_days: 0 })
+            });
+        subscription.link_user(transaction.user_id);
+        subscription.extend(months, now);
+        self.subscriptions.save_subscription(&subscription).await?;
+
+        transaction.mark_fulfilled(now);
+        self.transactions
+            .save_payment_transaction(&transaction)
+            .await?;
+
+        self.notify_payment_succeeded(transaction.user_id, &subscription)
+            .await?;
+        self.reward_referrer(transaction.user_id).await?;
+
+        Ok(SubscriptionPaymentStatus {
+            transaction,
+            subscription: Some(subscription),
+        })
+    }
+
+    async fn reward_referrer(&self, invited_id: UserId) -> ApplicationResult<()> {
+        let Some(mut referral) = self.referrals.find_referral_by_invited(invited_id).await? else {
+            return Ok(());
+        };
+
+        if referral.is_rewarded() {
+            return Ok(());
+        }
+
+        let now = self.clock.now();
+        let referrer_chat_id = ChatId::new(referral.referrer_id.value());
+        let mut subscription = self
+            .subscriptions
+            .find_subscription(referrer_chat_id)
+            .await?
+            .unwrap_or_else(|| {
+                Subscription::new_trial(referrer_chat_id, now, SubscriptionPolicy { trial_days: 0 })
+            });
+        subscription.link_user(referral.referrer_id);
+        subscription.extend(Months::new(1)?, now);
+        self.subscriptions.save_subscription(&subscription).await?;
+
+        referral.mark_rewarded(now);
+        self.referrals.save_referral(&referral).await?;
+
+        self.notifier
+            .notify(Notification::Text {
+                chat_id: referrer_chat_id,
+                text: format!(
+                    "🎁 Бонус по реферальной программе!\n\nВаш друг оформил подписку, и вы получили +1 месяц бесплатно.\n\nПодписка активна до {}.",
+                    subscription.expires_at.format("%d.%m.%Y")
+                ),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn notify_payment_succeeded(
+        &self,
+        user_id: UserId,
+        subscription: &Subscription,
+    ) -> ApplicationResult<()> {
+        self.notifier
+            .notify(Notification::Text {
+                chat_id: ChatId::new(user_id.value()),
+                text: format!(
+                    "🎉 Спасибо за покупку подписки!\n\nСтатус: активна\nДействует до: {}\n\nЕсли что-то непонятно — воспользуйтесь командой /help.",
+                    subscription.expires_at.format("%d.%m.%Y")
+                ),
+            })
+            .await
+    }
+
+    async fn notify_payment_canceled(&self, user_id: UserId) -> ApplicationResult<()> {
+        self.notifier
+            .notify(Notification::Text {
+                chat_id: ChatId::new(user_id.value()),
+                text: "❌ Оплата отменена.".to_string(),
+            })
+            .await
+    }
+
+    async fn notify_payment_waiting(&self, user_id: UserId) -> ApplicationResult<()> {
+        self.notifier
+            .notify(Notification::Text {
+                chat_id: ChatId::new(user_id.value()),
+                text: "⏳ Платёж ожидает подтверждения...".to_string(),
+            })
+            .await
+    }
+}
+
+fn payment_status_event(status: &PaymentStatus) -> &'static str {
+    match status {
+        PaymentStatus::Succeeded => "succeeded",
+        PaymentStatus::WaitingForCapture => "waiting",
+        PaymentStatus::Canceled => "canceled",
+        PaymentStatus::Failed => "failed",
+        PaymentStatus::Pending => "pending",
+        PaymentStatus::Unknown(_) => "unknown",
     }
 }

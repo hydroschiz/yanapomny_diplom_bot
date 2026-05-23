@@ -202,12 +202,13 @@ impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
     }
 
     async fn get_payment_status(&self, payment_id: &PaymentId) -> ApplicationResult<PaymentStatus> {
-        let url = format!("{}/{}", YOOKASSA_CREATE_PAYMENT_URL, payment_id.as_str());
+        let payment_id_str = payment_id.as_str();
+        let url = format!("{}/{}", YOOKASSA_CREATE_PAYMENT_URL, payment_id_str);
         let response = self
             .client
             .get(&url)
             .basic_auth(&self.shop_id, Some(&self.secret_key))
-            .header("Idempotence-Key", payment_id.as_str())
+            .header("Idempotence-Key", payment_id_str)
             .send()
             .await
             .map_err(|err| ApplicationError::ExternalService(err.to_string()))?;
@@ -216,7 +217,7 @@ impl PaymentGatewayPort for HttpYooKassaPaymentGateway {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ApplicationError::ExternalService(format!(
-                "YooKassa get payment failed: {status} {body}"
+                "YooKassa get payment {payment_id_str} failed: {status} {body}"
             )));
         }
 

@@ -221,6 +221,7 @@ dependencies = [
  "tracing-subscriber",
  "transport-core",
  "transport-vk",
+ "webhook",
 ]
 
 [[package]]
@@ -3022,6 +3023,7 @@ version = "0.2.0-rc.1"
 dependencies = [
  "anyhow",
  "application",
+ "async-trait",
  "axum",
  "domain",
  "dotenvy",
@@ -3031,6 +3033,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "transport-core",
+ "transport-vk",
 ]
 
 [[package]]

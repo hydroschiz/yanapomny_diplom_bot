@@ -34,6 +34,7 @@ use presentation::{
 use tracing::{error, info};
 use transport_core::BotTransport;
 use transport_vk::{run_long_poll, VkEventHandler, VkIncomingEvent, VkTransport};
+use webhook::spawn_yookassa_webhook_server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,6 +47,23 @@ async fn main() -> Result<()> {
     let payment_gateway = config.payment_gateway();
     let llm = HttpLlmInterpreter::new(config.llm_api_url.clone())?;
     let transport = VkTransport::new(config.vk_access_token.clone())?;
+
+    if config.bot_webhook_enabled {
+        if payment_gateway.is_some() {
+            spawn_yookassa_webhook_server(
+                &config.bind_ip,
+                config.webhook_port,
+                store.clone(),
+                payment_cache.clone(),
+                transport.clone(),
+            )
+            .await?;
+        } else {
+            info!("embedded YooKassa webhook server skipped because payment gateway is disabled");
+        }
+    } else {
+        info!("embedded YooKassa webhook server disabled");
+    }
 
     let handler = BotHandler {
         transport,
@@ -83,6 +101,9 @@ struct BotConfig {
     yk_secret_key: Option<String>,
     yk_return_url: String,
     yk_receipt: Option<YooKassaReceiptConfig>,
+    bind_ip: String,
+    webhook_port: u16,
+    bot_webhook_enabled: bool,
 }
 
 impl BotConfig {
@@ -102,6 +123,9 @@ impl BotConfig {
             yk_secret_key: optional_env("YK_SECRET_KEY"),
             yk_return_url: env_or("YK_RETURN_URL", "https://vk.com/yanapomnyu"),
             yk_receipt,
+            bind_ip: env_or("IP", "0.0.0.0"),
+            webhook_port: env_parse("PORT", 3001)?,
+            bot_webhook_enabled: parse_bool_env("BOT_WEBHOOK_ENABLED").unwrap_or(true),
         })
     }
 
@@ -612,6 +636,7 @@ impl BotHandler {
                 .await;
         }
         let payment_id = PaymentId::new(payment_id);
+        tracing::info!(payment_id = %payment_id, "Manual payment check requested");
         let status = match CheckSubscriptionPaymentUseCase::new(
             &self.store,
             self.payment_gateway.as_ref(),
@@ -1161,6 +1186,28 @@ fn optional_env(name: &str) -> Option<String> {
 
 fn env_or(name: &str, default: &str) -> String {
     optional_env(name).unwrap_or_else(|| default.to_string())
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    let value = optional_env(name)?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn env_parse<T>(name: &str, default: T) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match optional_env(name) {
+        Some(value) => value
+            .parse()
+            .map_err(|error| anyhow::anyhow!("{name} has invalid value `{value}`: {error}")),
+        None => Ok(default),
+    }
 }
 
 fn parse_snooze_buttons(input: &str) -> Vec<SnoozeDuration> {
