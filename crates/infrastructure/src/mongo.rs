@@ -1647,7 +1647,7 @@ impl PaymentDto {
             payment_id: value.payment_id.into_string(),
             subscription_id: None,
             provider: value.provider,
-            provider_payment_id: None,
+            provider_payment_id: value.provider_payment_id,
             user_id: Some(value.user_id.value()),
             amount: value.amount.amount,
             currency: value.amount.currency.to_string(),
@@ -1697,6 +1697,7 @@ impl PaymentDto {
         transaction.fulfilled_at = self.fulfilled_at;
         transaction.idempotence_key = self.idempotence_key;
         transaction.provider = self.provider;
+        transaction.provider_payment_id = self.provider_payment_id;
         Ok(transaction)
     }
 }
