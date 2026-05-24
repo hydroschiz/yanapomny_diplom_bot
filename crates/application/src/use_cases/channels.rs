@@ -101,6 +101,55 @@ where
     }
 }
 
+pub struct CheckAllTwitchStreamsUseCase<'a, R, G> {
+    subscriptions: &'a R,
+    gateway: &'a G,
+}
+
+impl<'a, R, G> CheckAllTwitchStreamsUseCase<'a, R, G>
+where
+    R: ExternalChannelSubscriptionRepository,
+    G: StreamPlatformGateway,
+{
+    pub const fn new(subscriptions: &'a R, gateway: &'a G) -> Self {
+        Self {
+            subscriptions,
+            gateway,
+        }
+    }
+
+    pub async fn execute(&self) -> ApplicationResult<Vec<ExternalChannelSubscription>> {
+        let mut changed = Vec::new();
+        for mut subscription in self
+            .subscriptions
+            .list_all_external_channel_subscriptions()
+            .await?
+            .into_iter()
+            .filter(|subscription| subscription.platform == Platform::Twitch)
+        {
+            let latest = self.gateway.latest_content_id(&subscription).await?;
+            let is_live = latest.is_some();
+            if latest != subscription.last_content_id || is_live != subscription.is_live {
+                if let Some(content_id) = latest {
+                    subscription.mark_content_seen(content_id);
+                    subscription.set_live(true);
+                    self.subscriptions
+                        .save_external_channel_subscription(&subscription)
+                        .await?;
+                    changed.push(subscription);
+                } else {
+                    subscription.last_content_id = None;
+                    subscription.set_live(false);
+                    self.subscriptions
+                        .save_external_channel_subscription(&subscription)
+                        .await?;
+                }
+            }
+        }
+        Ok(changed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteExternalChannelSubscriptionCommand {
     pub user_id: UserId,

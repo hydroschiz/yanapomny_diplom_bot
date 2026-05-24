@@ -523,12 +523,18 @@ where
             })?;
             let mut event =
                 DeliveryEvent::planned(reminder_id, self.delivery_channel, reminder.next_at);
+            let snooze_buttons = self
+                .preferences
+                .find_snooze_buttons_for_chat(reminder.chat_id)
+                .await?;
 
             let result = self
                 .notifier
-                .notify(Notification::Text {
+                .notify(Notification::ReminderDue {
                     chat_id: reminder.chat_id,
+                    reminder_id,
                     text: reminder.text.clone(),
+                    snooze_buttons,
                 })
                 .await;
 

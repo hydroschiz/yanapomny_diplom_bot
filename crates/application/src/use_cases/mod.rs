@@ -7,9 +7,10 @@ pub mod task;
 pub mod user;
 
 pub use channels::{
-    CheckTwitchStreamsUseCase, DeleteExternalChannelSubscriptionCommand,
-    DeleteExternalChannelSubscriptionUseCase, ListExternalChannelSubscriptionsUseCase,
-    SaveExternalChannelSubscriptionCommand, SaveExternalChannelSubscriptionUseCase,
+    CheckAllTwitchStreamsUseCase, CheckTwitchStreamsUseCase,
+    DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
+    ListExternalChannelSubscriptionsUseCase, SaveExternalChannelSubscriptionCommand,
+    SaveExternalChannelSubscriptionUseCase,
 };
 pub use payment::{
     CheckSubscriptionPaymentUseCase, CreatePaymentCommand, CreatePaymentUseCase,
@@ -26,7 +27,10 @@ pub use reminder::{
     ListActiveRemindersUseCase, PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase,
     PreviewedReminderFromText, ReminderActionCommand, SnoozeReminderUseCase,
 };
-pub use subscription::EnsureSubscriptionUseCase;
+pub use subscription::{
+    EnsureSubscriptionUseCase, PurgeExpiredSubscriptionsUseCase, SubscriptionMaintenanceReport,
+    WarnExpiringSubscriptionsUseCase,
+};
 pub use task::{
     active_tasks, CompleteTaskUseCase, CreateTaskCommand, CreateTaskFromTextUseCase,
     CreateTaskUseCase, DeleteTaskUseCase, ListTasksUseCase,

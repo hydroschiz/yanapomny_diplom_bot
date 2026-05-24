@@ -2,30 +2,32 @@ use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
 use application::{
-    active_tasks, ApplicationError, CancelReminderUseCase, CheckSubscriptionPaymentUseCase, Clock,
+    ApplicationError, CancelReminderUseCase, CheckSubscriptionPaymentUseCase, Clock,
     CompleteReminderUseCase, CreateReminderFromPreviewCommand, CreateReminderFromPreviewUseCase,
     CreateSubscriptionPaymentCommand, CreateSubscriptionPaymentUseCase,
     DeleteExternalChannelSubscriptionCommand, DeleteExternalChannelSubscriptionUseCase,
     DialogState, DialogStateStore, EnsureSubscriptionUseCase, EnsureUserUseCase, GetProfileUseCase,
     InterpretedTask, ListActiveRemindersUseCase, ListExternalChannelSubscriptionsUseCase,
-    ListTasksUseCase, PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase, ProfileView,
-    ReminderActionCommand, SaveExternalChannelSubscriptionCommand,
+    PreviewReminderFromTextCommand, PreviewReminderFromTextUseCase, ProfileView,
+    ReminderActionCommand, ReminderRepository, SaveExternalChannelSubscriptionCommand,
     SaveExternalChannelSubscriptionUseCase, SetAutoSnoozeUseCase, SetSnoozeButtonsUseCase,
-    SetUserTimezoneUseCase, SnoozeReminderUseCase, SubscriptionRepository,
+    SetUserTimezoneUseCase, SnoozeReminderUseCase, SubscriptionRepository, UserRepository,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Datelike, FixedOffset, Offset, TimeZone as ChronoTimeZone, Timelike, Utc};
 use domain::{
     tariff_for_months, ChatId, ExternalChannelSubscription, Months, PaymentId, PaymentStatus,
     Platform, Reminder, ReminderId, ReminderStatus, SnoozeDuration, SubscriptionPolicy,
-    SubscriptionStatus, Task, TimePreferences, UserId,
+    SubscriptionStatus, TimePreferences, TimeZone, UserId,
 };
 use infrastructure::{
     HttpLlmInterpreter, HttpYooKassaPaymentGateway, MongoStore, RedisPaymentCache, SystemClock,
     UuidPaymentIdGenerator, YooKassaReceiptConfig,
 };
 use presentation::keyboard::{
-    channel_subs_keyboard, pay_link_keyboard, pay_provider_keyboard, reminder_confirm_keyboard,
-    reminder_edit_keyboard, snooze_code_to_label, snooze_code_to_minutes, text_confirm_keyboard,
+    channel_subs_keyboard, delete_keyboard, list_delete_keyboard, pay_link_keyboard,
+    pay_provider_keyboard, reminder_confirm_keyboard, reminder_edit_keyboard, snooze_code_to_label,
+    snooze_code_to_minutes, text_confirm_keyboard,
 };
 use presentation::{
     CallbackRoute, ChannelPlatform, IncomingCallback, IncomingMessage, MessageRoute, Notification,
@@ -265,12 +267,17 @@ impl BotHandler {
                     .await
             }
             MessageRoute::SnoozeButtonsInput(input) => {
-                let buttons = parse_snooze_buttons(&input);
+                let buttons = match parse_snooze_buttons(&input) {
+                    Ok(buttons) => buttons,
+                    Err(error_text) => {
+                        return self.send_text(message.peer_id, error_text).await;
+                    }
+                };
                 if buttons.is_empty() {
                     return self
                         .send_text(
                             message.peer_id,
-                            "Не смог распознать время. Отправьте числа минутами, например: 15 60 180.",
+                            "Не смог распознать время. Пример: 15 мин, 1 час, 2 дня.",
                         )
                         .await;
                 }
@@ -290,11 +297,11 @@ impl BotHandler {
                 .await
             }
             MessageRoute::AutoSnoozeInput(input) => {
-                let Some(minutes) = parse_first_minutes(&input) else {
+                let Some(minutes) = parse_auto_snooze_minutes(&input) else {
                     return self
                         .send_text(
                             message.peer_id,
-                            "Не смог распознать время. Отправьте число минутами, например: 15.",
+                            "Не смог распознать время. Доступно: 5 мин, 10 мин, 15 мин, 20 мин.",
                         )
                         .await;
                 };
@@ -319,14 +326,20 @@ impl BotHandler {
             }
             MessageRoute::ShowPay => self.show_payment_menu(message.peer_id).await,
             MessageRoute::ShowProfile => self.show_profile(message.peer_id, message.user_id).await,
-            MessageRoute::CreateReminderFromCommand(text)
-            | MessageRoute::ReminderText(text)
-            | MessageRoute::GroupReminderText(text) => {
+            MessageRoute::CreateReminderFromCommand(text) | MessageRoute::ReminderText(text) => {
+                self.start_personal_reminder_text_confirmation(
+                    message.peer_id,
+                    message.user_id,
+                    text,
+                )
+                .await
+            }
+            MessageRoute::GroupReminderText(text) => {
                 self.start_reminder_text_confirmation(message.peer_id, message.user_id, text)
                     .await
             }
             MessageRoute::ListReminders => {
-                self.show_active_tasks(message.peer_id, message.user_id)
+                self.show_active_reminders(message.peer_id, message.user_id)
                     .await
             }
             MessageRoute::ShowSubscriptions => {
@@ -348,6 +361,14 @@ impl BotHandler {
             MessageRoute::Ignored | MessageRoute::Empty => Ok(()),
             MessageRoute::ReminderDeletionInput(input) => {
                 self.delete_reminder_from_input(message.peer_id, message.user_id, &input)
+                    .await
+            }
+            MessageRoute::ExistingReminderEditSelection(input) => {
+                self.select_reminder_for_edit(message.peer_id, message.user_id, &input)
+                    .await
+            }
+            MessageRoute::ExistingReminderEditText(input) => {
+                self.update_existing_reminder_text(message.peer_id, message.user_id, &input)
                     .await
             }
             MessageRoute::ChannelDeletionInput(input) => {
@@ -450,7 +471,7 @@ impl BotHandler {
                 self.show_profile(callback.peer_id, callback.user_id).await
             }
             CallbackRoute::ListReminders => {
-                self.show_active_tasks(callback.peer_id, callback.user_id)
+                self.show_active_reminders(callback.peer_id, callback.user_id)
                     .await
             }
             CallbackRoute::SnoozeReminder { reminder_id, code } => {
@@ -462,6 +483,10 @@ impl BotHandler {
             }
             CallbackRoute::StartReminderDeletion => {
                 self.start_reminder_deletion(callback.peer_id, callback.user_id)
+                    .await
+            }
+            CallbackRoute::StartReminderEdit => {
+                self.start_existing_reminder_edit(callback.peer_id, callback.user_id)
                     .await
             }
             CallbackRoute::ShowSubscriptions => {
@@ -515,8 +540,7 @@ impl BotHandler {
                 self.state_store
                     .set_state(UserId::new(callback.user_id), DialogState::Idle)
                     .await?;
-                self.send_text(callback.peer_id, "Создание напоминания отменено.")
-                    .await
+                self.send_text(callback.peer_id, "Действие отменено.").await
             }
             CallbackRoute::Unknown(_) => {
                 self.send_text(callback.peer_id, "Неизвестное действие.")
@@ -689,9 +713,14 @@ impl BotHandler {
     }
 
     async fn update_timezone(&self, peer_id: i64, user_id: i64, offset: &str) -> Result<()> {
-        let preferences =
-            TimePreferences::from_fixed_offset_strings("08:00", "14:00", "19:00", offset)?;
-        let display_offset = preferences.utc_offset.to_string();
+        let Some((preferences, display_offset)) = parse_timezone_preferences(offset) else {
+            return self
+                .send_text(
+                    peer_id,
+                    "Не смог распознать часовой пояс. Напишите город, IANA timezone вроде Europe/Moscow или UTC offset вроде +07:00.",
+                )
+                .await;
+        };
         SetUserTimezoneUseCase::new(&self.store)
             .execute(UserId::new(user_id), preferences)
             .await?;
@@ -734,6 +763,47 @@ impl BotHandler {
         Ok(())
     }
 
+    async fn start_personal_reminder_text_confirmation(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        text: String,
+    ) -> Result<()> {
+        let user_id = UserId::new(user_id);
+        let Some(user) = self.store.find_user(user_id).await? else {
+            EnsureUserUseCase::new(&self.store).execute(user_id).await?;
+            return self
+                .send_text(
+                    peer_id,
+                    "Сначала настройте часовой пояс: /utc или кнопка «Время суток (UTC)» в настройках.",
+                )
+                .await;
+        };
+        if matches!(user.time_preferences.time_zone, TimeZone::Utc) {
+            return self
+                .send_text(
+                    peer_id,
+                    "Сначала настройте часовой пояс: /utc или кнопка «Время суток (UTC)» в настройках.",
+                )
+                .await;
+        }
+
+        let subscription = self.store.find_subscription(ChatId::new(peer_id)).await?;
+        if !subscription.as_ref().is_some_and(|subscription| {
+            subscription.active && subscription.is_active(self.clock.now())
+        }) {
+            return self
+                .send_text(
+                    peer_id,
+                    "Для создания напоминаний нужна активная подписка. Откройте /pay или профиль.",
+                )
+                .await;
+        }
+
+        self.start_reminder_text_confirmation(peer_id, user_id.value(), text)
+            .await
+    }
+
     async fn preview_reminder_from_pending_text(&self, peer_id: i64, user_id: i64) -> Result<()> {
         let state = self.state_store.get_state(UserId::new(user_id)).await?;
         let DialogState::AwaitingTextConfirmation { text } = state else {
@@ -766,10 +836,11 @@ impl BotHandler {
             }
         };
 
+        let offset = self.user_fixed_offset(user_id).await?;
         self.send_notification(
             peer_id,
             Notification::PlainText {
-                text: format_reminder_preview(&preview.interpreted),
+                text: format_reminder_preview(&preview.interpreted, offset),
                 keyboard: Some(reminder_confirm_keyboard(self.transport.capabilities())),
             },
         )
@@ -806,13 +877,14 @@ impl BotHandler {
             .await?;
 
         let reminder = created.reminder;
+        let offset = self.user_fixed_offset(user_id).await?;
         self.send_notification(
             peer_id,
             Notification::PlainText {
                 text: format!(
                     "✅ <b>Напоминание создано!</b>\n\n📌 {}\n🕐 {}\n🆔 #{}",
                     html_escape(&reminder.text),
-                    reminder.next_at.format("%d.%m.%Y %H:%M UTC"),
+                    format_local_datetime(reminder.next_at, offset),
                     reminder.id.map(|id| id.value()).unwrap_or_default()
                 ),
                 keyboard: None,
@@ -872,19 +944,23 @@ impl BotHandler {
             .await
     }
 
-    async fn show_active_tasks(&self, peer_id: i64, user_id: i64) -> Result<()> {
-        let mut tasks = active_tasks(
-            ListTasksUseCase::new(&self.store)
-                .execute(UserId::new(user_id))
-                .await?,
-        );
-        tasks.sort_by(compare_tasks_for_list);
-
-        if tasks.is_empty() {
-            return self.send_text(peer_id, "Активных задач пока нет.").await;
+    async fn show_active_reminders(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let reminders = self.active_reminders_for_chat(peer_id).await?;
+        if reminders.is_empty() {
+            return self
+                .send_text(peer_id, "Активных напоминаний пока нет.")
+                .await;
         }
 
-        self.send_text(peer_id, &format_active_tasks(&tasks)).await
+        let offset = self.user_fixed_offset(user_id).await?;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format_active_reminders(&reminders, offset),
+                keyboard: Some(list_delete_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await
     }
 
     async fn save_external_channel_subscription(
@@ -1032,12 +1108,13 @@ impl BotHandler {
             Err(error) => return Err(error.into()),
         };
 
+        let offset = self.chat_fixed_offset(peer_id).await?;
         self.send_text(
             peer_id,
             &format!(
                 "Напоминание отложено на {}.\nНовое время: {}",
                 snooze_code_to_label(code),
-                reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+                format_local_datetime(reminder.next_at, offset)
             ),
         )
         .await
@@ -1065,9 +1142,10 @@ impl BotHandler {
         let text = if reminder.status == ReminderStatus::Sent {
             "Напоминание выполнено.".to_string()
         } else {
+            let offset = self.chat_fixed_offset(peer_id).await?;
             format!(
                 "Напоминание отмечено. Следующее сработает: {}",
-                reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+                format_local_datetime(reminder.next_at, offset)
             )
         };
         self.send_text(peer_id, &text).await
@@ -1087,12 +1165,130 @@ impl BotHandler {
         self.state_store
             .set_state(UserId::new(user_id), DialogState::AwaitingReminderDeletion)
             .await?;
-        self.send_text(
+        self.send_notification(
             peer_id,
-            &format!(
-                "Введите номер напоминания для удаления:\n{}",
-                format_active_reminders(&reminders)
-            ),
+            Notification::PlainText {
+                text: format!(
+                    "Введите номер напоминания для удаления:\n{}",
+                    format_active_reminders(&reminders, self.user_fixed_offset(user_id).await?)
+                ),
+                keyboard: Some(delete_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await
+    }
+
+    async fn start_existing_reminder_edit(&self, peer_id: i64, user_id: i64) -> Result<()> {
+        let reminders = self.active_reminders_for_chat(peer_id).await?;
+        if reminders.is_empty() {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self
+                .send_text(peer_id, "Активных напоминаний для изменения нет.")
+                .await;
+        }
+
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingExistingReminderEditSelection,
+            )
+            .await?;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format!(
+                    "Введите номер напоминания для изменения:\n{}",
+                    format_active_reminders(&reminders, self.user_fixed_offset(user_id).await?)
+                ),
+                keyboard: Some(delete_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await
+    }
+
+    async fn select_reminder_for_edit(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        input: &str,
+    ) -> Result<()> {
+        let Some(reminder) = self.reminder_by_list_number(peer_id, input).await? else {
+            return self
+                .send_text(peer_id, "Введите номер напоминания из списка.")
+                .await;
+        };
+        let Some(reminder_id) = reminder.id else {
+            return self
+                .send_text(peer_id, "Не смог определить ID напоминания.")
+                .await;
+        };
+
+        self.state_store
+            .set_state(
+                UserId::new(user_id),
+                DialogState::AwaitingExistingReminderText { reminder_id },
+            )
+            .await?;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format!(
+                    "✏️ Введите новый текст для напоминания:\n\n<i>Текущий:</i> {}",
+                    html_escape(&reminder.text)
+                ),
+                keyboard: Some(reminder_edit_keyboard(self.transport.capabilities())),
+            },
+        )
+        .await
+    }
+
+    async fn update_existing_reminder_text(
+        &self,
+        peer_id: i64,
+        user_id: i64,
+        input: &str,
+    ) -> Result<()> {
+        let input = input.trim();
+        if input.is_empty() {
+            return self
+                .send_text(peer_id, "Текст не может быть пустым. Введите новый текст.")
+                .await;
+        }
+        let state = self.state_store.get_state(UserId::new(user_id)).await?;
+        let DialogState::AwaitingExistingReminderText { reminder_id } = state else {
+            return self
+                .send_text(peer_id, "Нет выбранного напоминания для изменения.")
+                .await;
+        };
+        let Some(mut reminder) = self.store.find_reminder(reminder_id).await? else {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self.send_text(peer_id, "Напоминание не найдено.").await;
+        };
+        if reminder.chat_id != ChatId::new(peer_id) || reminder.status.is_terminal() {
+            self.state_store
+                .set_state(UserId::new(user_id), DialogState::Idle)
+                .await?;
+            return self.send_text(peer_id, "Напоминание уже закрыто.").await;
+        }
+
+        reminder.text = input.to_string();
+        self.store.save_reminder(&reminder).await?;
+        self.state_store
+            .set_state(UserId::new(user_id), DialogState::Idle)
+            .await?;
+        self.send_notification(
+            peer_id,
+            Notification::PlainText {
+                text: format!(
+                    "✅ Напоминание изменено.\n\n{}",
+                    format_active_reminders(&[reminder], self.user_fixed_offset(user_id).await?)
+                ),
+                keyboard: Some(list_delete_keyboard(self.transport.capabilities())),
+            },
         )
         .await
     }
@@ -1103,21 +1299,9 @@ impl BotHandler {
         user_id: i64,
         input: &str,
     ) -> Result<()> {
-        let Ok(number) = input.trim().parse::<usize>() else {
+        let Some(reminder) = self.reminder_by_list_number(peer_id, input).await? else {
             return self
                 .send_text(peer_id, "Введите номер напоминания из списка.")
-                .await;
-        };
-        if number == 0 {
-            return self
-                .send_text(peer_id, "Введите номер напоминания из списка.")
-                .await;
-        }
-
-        let reminders = self.active_reminders_for_chat(peer_id).await?;
-        let Some(reminder) = reminders.get(number - 1) else {
-            return self
-                .send_text(peer_id, "Напоминания с таким номером нет.")
                 .await;
         };
         let Some(reminder_id) = reminder.id else {
@@ -1145,6 +1329,33 @@ impl BotHandler {
             .await?;
         reminders.sort_by(compare_reminders_for_list);
         Ok(reminders)
+    }
+
+    async fn reminder_by_list_number(&self, peer_id: i64, input: &str) -> Result<Option<Reminder>> {
+        let Ok(number) = input.trim().parse::<usize>() else {
+            return Ok(None);
+        };
+        if number == 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .active_reminders_for_chat(peer_id)
+            .await?
+            .get(number - 1)
+            .cloned())
+    }
+
+    async fn user_fixed_offset(&self, user_id: i64) -> Result<FixedOffset> {
+        Ok(self
+            .store
+            .find_user(UserId::new(user_id))
+            .await?
+            .map(|user| user.time_preferences.fixed_offset())
+            .unwrap_or_else(|| TimePreferences::default().fixed_offset()))
+    }
+
+    async fn chat_fixed_offset(&self, peer_id: i64) -> Result<FixedOffset> {
+        self.user_fixed_offset(peer_id).await
     }
 
     async fn send_notification(&self, peer_id: i64, notification: Notification) -> Result<()> {
@@ -1210,34 +1421,204 @@ where
     }
 }
 
-fn parse_snooze_buttons(input: &str) -> Vec<SnoozeDuration> {
+fn parse_snooze_buttons(input: &str) -> Result<Vec<SnoozeDuration>, &'static str> {
     let mut buttons = Vec::new();
-    for minutes in input
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter_map(|part| part.parse::<u32>().ok())
-        .filter(|minutes| *minutes > 0)
-    {
+    for minutes in parse_duration_minutes(input) {
+        if !ALLOWED_SNOOZE_MINUTES.contains(&minutes) {
+            return Err("Такой интервал недоступен. Доступно: 5, 10, 15, 20, 30 мин; 1-4 часа; 1, 2, 3, 7 дней.");
+        }
         let duration = SnoozeDuration::from_minutes(minutes);
         if !buttons.contains(&duration) {
             buttons.push(duration);
         }
     }
-    buttons
+    Ok(buttons)
 }
 
-fn parse_first_minutes(input: &str) -> Option<u32> {
-    input
-        .split(|ch: char| !ch.is_ascii_digit())
-        .find_map(|part| part.parse::<u32>().ok())
-        .filter(|minutes| *minutes > 0)
+fn parse_auto_snooze_minutes(input: &str) -> Option<u32> {
+    let mut durations = parse_duration_minutes(input);
+    let minutes = durations.pop()?;
+    if durations.is_empty() && ALLOWED_AUTO_SNOOZE_MINUTES.contains(&minutes) {
+        Some(minutes)
+    } else {
+        None
+    }
 }
 
 fn format_snooze_buttons(buttons: &[SnoozeDuration]) -> String {
     buttons
         .iter()
-        .map(|button| format!("{} мин", button.minutes()))
+        .map(|button| format_duration_minutes(button.minutes()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+const ALLOWED_SNOOZE_MINUTES: &[u32] = &[
+    5, 10, 15, 20, 30, 60, 120, 180, 240, 1440, 2880, 4320, 10080,
+];
+const ALLOWED_AUTO_SNOOZE_MINUTES: &[u32] = &[5, 10, 15, 20];
+
+fn parse_duration_minutes(input: &str) -> Vec<u32> {
+    let normalized = input.to_lowercase().replace([',', ';', '\n'], " ");
+    let parts = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut durations = Vec::new();
+    let mut index = 0;
+
+    while index < parts.len() {
+        let Ok(value) = parts[index].parse::<u32>() else {
+            index += 1;
+            continue;
+        };
+        let unit = parts.get(index + 1).copied().unwrap_or("мин");
+        let (multiplier, consumed_unit) = if unit.starts_with("час") || unit.starts_with("ч") {
+            (60, true)
+        } else if unit.starts_with("ден") || unit.starts_with("дн") || unit.starts_with("сут")
+        {
+            (1440, true)
+        } else {
+            (1, unit.starts_with("мин") || unit.starts_with("м"))
+        };
+        durations.push(value.saturating_mul(multiplier));
+        index += if consumed_unit { 2 } else { 1 };
+    }
+
+    durations
+}
+
+fn format_duration_minutes(minutes: u32) -> String {
+    if minutes.is_multiple_of(1440) {
+        let days = minutes / 1440;
+        format!("{} {}", days, plural(days, "день", "дня", "дней"))
+    } else if minutes.is_multiple_of(60) {
+        let hours = minutes / 60;
+        format!("{} {}", hours, plural(hours, "час", "часа", "часов"))
+    } else {
+        format!("{} мин", minutes)
+    }
+}
+
+fn parse_timezone_preferences(input: &str) -> Option<(TimePreferences, String)> {
+    if let Ok(preferences) =
+        TimePreferences::from_fixed_offset_strings("08:00", "14:00", "19:00", input)
+    {
+        let display = preferences.utc_offset.to_string();
+        return Some((preferences, display));
+    }
+
+    let tz_name = resolve_timezone(input)?;
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+    let offset = tz
+        .offset_from_utc_datetime(&Utc::now().naive_utc())
+        .fix()
+        .local_minus_utc();
+    let offset_string = offset_seconds_to_string(offset);
+    let mut preferences =
+        TimePreferences::from_fixed_offset_strings("08:00", "14:00", "19:00", &offset_string)
+            .ok()?;
+    preferences.time_zone = TimeZone::Iana(tz_name);
+    Some((preferences, offset_string))
+}
+
+fn resolve_timezone(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.contains('/') {
+        return trimmed
+            .replace(' ', "")
+            .parse::<chrono_tz::Tz>()
+            .ok()
+            .map(|_| trimmed.replace(' ', ""));
+    }
+
+    let lower = trimmed.to_lowercase();
+    CITY_MAP
+        .iter()
+        .find(|(city, _)| *city == lower)
+        .map(|(_, timezone)| (*timezone).to_string())
+}
+
+const CITY_MAP: &[(&str, &str)] = &[
+    ("москва", "Europe/Moscow"),
+    ("moscow", "Europe/Moscow"),
+    ("питер", "Europe/Moscow"),
+    ("spb", "Europe/Moscow"),
+    ("санкт-петербург", "Europe/Moscow"),
+    ("yekaterinburg", "Asia/Yekaterinburg"),
+    ("екатеринбург", "Asia/Yekaterinburg"),
+    ("novosibirsk", "Asia/Novosibirsk"),
+    ("новосибирск", "Asia/Novosibirsk"),
+    ("krasnoyarsk", "Asia/Krasnoyarsk"),
+    ("красноярск", "Asia/Krasnoyarsk"),
+    ("kazan", "Europe/Moscow"),
+    ("казань", "Europe/Moscow"),
+    ("omsk", "Asia/Omsk"),
+    ("omsk city", "Asia/Omsk"),
+    ("омск", "Asia/Omsk"),
+    ("vladivostok", "Asia/Vladivostok"),
+    ("владивосток", "Asia/Vladivostok"),
+    ("irkutsk", "Asia/Irkutsk"),
+    ("иркутск", "Asia/Irkutsk"),
+    ("samara", "Europe/Samara"),
+    ("самара", "Europe/Samara"),
+];
+
+fn offset_seconds_to_string(seconds: i32) -> String {
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let total = seconds.abs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    format!("{sign}{hours:02}:{minutes:02}")
+}
+
+fn format_local_datetime(value: DateTime<Utc>, offset: FixedOffset) -> String {
+    let local = value.with_timezone(&offset);
+    format!(
+        "{}, {:02}:{:02} {}",
+        local.format("%d.%m.%Y"),
+        local.hour(),
+        local.minute(),
+        offset_seconds_to_string(offset.local_minus_utc())
+    )
+}
+
+fn russian_month_name(month: u32) -> &'static str {
+    match month {
+        1 => "Январь",
+        2 => "Февраль",
+        3 => "Март",
+        4 => "Апрель",
+        5 => "Май",
+        6 => "Июнь",
+        7 => "Июль",
+        8 => "Август",
+        9 => "Сентябрь",
+        10 => "Октябрь",
+        11 => "Ноябрь",
+        12 => "Декабрь",
+        _ => "",
+    }
+}
+
+fn russian_weekday_short(day: chrono::Weekday) -> &'static str {
+    match day {
+        chrono::Weekday::Mon => "пн",
+        chrono::Weekday::Tue => "вт",
+        chrono::Weekday::Wed => "ср",
+        chrono::Weekday::Thu => "чт",
+        chrono::Weekday::Fri => "пт",
+        chrono::Weekday::Sat => "сб",
+        chrono::Weekday::Sun => "вс",
+    }
+}
+
+fn plural(value: u32, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    match value % 100 {
+        11..=14 => many,
+        _ => match value % 10 {
+            1 => one,
+            2..=4 => few,
+            _ => many,
+        },
+    }
 }
 
 fn channel_platform(platform: ChannelPlatform) -> Platform {
@@ -1287,7 +1668,7 @@ fn format_profile_subscription(status: Option<SubscriptionStatus>) -> String {
     }
 }
 
-fn format_reminder_preview(interpreted: &InterpretedTask) -> String {
+fn format_reminder_preview(interpreted: &InterpretedTask, offset: FixedOffset) -> String {
     format!(
         "📝 <b>Подтвердите напоминание:</b>\n\n\
          📌 <b>Текст:</b> {}\n\
@@ -1295,7 +1676,7 @@ fn format_reminder_preview(interpreted: &InterpretedTask) -> String {
          🔄 <b>Тип:</b> {}\n\n\
          Подтвердите создание или отредактируйте текст.",
         html_escape(&interpreted.title),
-        interpreted.trigger_at.format("%d.%m.%Y %H:%M UTC"),
+        format_local_datetime(interpreted.trigger_at, offset),
         reminder_type_label(interpreted)
     )
 }
@@ -1313,45 +1694,34 @@ fn html_escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn compare_tasks_for_list(left: &Task, right: &Task) -> Ordering {
-    compare_optional_due(left, right).then_with(|| left.created_at.cmp(&right.created_at))
-}
-
 fn compare_reminders_for_list(left: &Reminder, right: &Reminder) -> Ordering {
     left.next_at
         .cmp(&right.next_at)
         .then_with(|| left.text.cmp(&right.text))
 }
 
-fn compare_optional_due(left: &Task, right: &Task) -> Ordering {
-    match (left.due_at.as_ref(), right.due_at.as_ref()) {
-        (Some(left), Some(right)) => left.cmp(right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn format_active_tasks(tasks: &[Task]) -> String {
-    let mut text = String::from("Активные задачи:\n");
-    for (index, task) in tasks.iter().enumerate() {
-        let due_at = task
-            .due_at
-            .map(|due_at| due_at.format("%d.%m.%Y %H:%M UTC").to_string())
-            .unwrap_or_else(|| "без срока".to_string());
-        text.push_str(&format!("{}. {} - {}\n", index + 1, task.title, due_at));
-    }
-    text
-}
-
-fn format_active_reminders(reminders: &[Reminder]) -> String {
-    let mut text = String::new();
+fn format_active_reminders(reminders: &[Reminder], offset: FixedOffset) -> String {
+    let mut text = String::from("📋 Активные напоминания:\n");
+    let mut current_month: Option<(i32, u32)> = None;
     for (index, reminder) in reminders.iter().enumerate() {
+        let local = reminder.next_at.with_timezone(&offset);
+        let month = (local.year(), local.month());
+        if current_month != Some(month) {
+            current_month = Some(month);
+            text.push_str(&format!(
+                "\n<b>{} {}</b>\n",
+                russian_month_name(local.month()),
+                local.year()
+            ));
+        }
         text.push_str(&format!(
-            "{}. {} - {}\n",
+            "{}. {} — {}, {:02}:{:02}\n   {}\n",
             index + 1,
-            reminder.text,
-            reminder.next_at.format("%d.%m.%Y %H:%M UTC")
+            html_escape(&reminder.text),
+            russian_weekday_short(local.weekday()),
+            local.hour(),
+            local.minute(),
+            local.format("%d.%m.%Y")
         ));
     }
     text

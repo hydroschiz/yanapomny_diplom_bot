@@ -60,6 +60,15 @@ fn router_routes_plain_text_by_dialog_state() {
         router.route_message(&message, DialogState::Idle),
         MessageRoute::ReminderText("Москва".to_string())
     );
+    assert_eq!(
+        router.route_message(
+            &message,
+            DialogState::AwaitingTextConfirmation {
+                text: "старый текст".to_string(),
+            },
+        ),
+        MessageRoute::ReminderText("Москва".to_string())
+    );
 }
 
 #[test]

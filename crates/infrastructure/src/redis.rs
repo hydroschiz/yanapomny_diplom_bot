@@ -1,4 +1,7 @@
-use application::{ApplicationError, ApplicationResult, PaymentCachePort, PendingPayment};
+use application::{
+    ApplicationError, ApplicationResult, PaymentCachePort, PendingPayment,
+    SchedulerDeduplicationPort,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use domain::{Months, PaymentId, UserId};
@@ -42,8 +45,33 @@ impl RedisPaymentCache {
         format!("{}:lock:fulfill:{}", self.key_prefix, payment_id)
     }
 
+    fn once_key(&self, key: &str) -> String {
+        format!("{}:once:{}", self.key_prefix, key)
+    }
+
     fn ttl_until(expires_at: DateTime<Utc>) -> u64 {
         (expires_at - Utc::now()).num_seconds().max(1) as u64
+    }
+}
+
+#[async_trait]
+impl SchedulerDeduplicationPort for RedisPaymentCache {
+    async fn once(&self, key: &str, expires_at: DateTime<Utc>) -> ApplicationResult<bool> {
+        let mut connection = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|err| ApplicationError::Repository(err.to_string()))?;
+        let response: Option<String> = redis::cmd("SET")
+            .arg(self.once_key(key))
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(Self::ttl_until(expires_at))
+            .query_async(&mut connection)
+            .await
+            .map_err(|err| ApplicationError::Repository(err.to_string()))?;
+        Ok(response.is_some())
     }
 }
 

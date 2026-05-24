@@ -2,8 +2,8 @@ use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DeliveryEventRepository,
     DialogState, DialogStateStore, ExternalChannelSubscriptionRepository, InterpretedTask,
     PaymentRepository, PaymentTransactionRepository, ReferralRepository,
-    ReminderPreferencesRepository, ReminderRepository, SubscriptionRepository, TaskRepository,
-    UserPreferencesRepository, UserRepository,
+    ReminderPreferencesRepository, ReminderRepository, SubscriptionMaintenanceRepository,
+    SubscriptionRepository, TaskRepository, UserPreferencesRepository, UserRepository,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -384,6 +384,31 @@ impl ReminderPreferencesRepository for MongoStore {
             .transpose()
             .map(|user| user.map(|user| user.time_preferences).unwrap_or_default())
     }
+
+    async fn find_snooze_buttons_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> ApplicationResult<Vec<SnoozeDuration>> {
+        let dto = self
+            .users()
+            .find_one(
+                doc! {
+                    "$or": [
+                        { "_id": chat_id.value() },
+                        { "identities.chat_id": chat_id.value() },
+                    ],
+                },
+                None,
+            )
+            .await
+            .map_err(repo_err)?;
+
+        Ok(dto
+            .map(User::try_from)
+            .transpose()?
+            .map(|user| user.snooze_buttons)
+            .unwrap_or_else(|| User::new(UserId::new(chat_id.value())).snooze_buttons))
+    }
 }
 
 #[async_trait]
@@ -601,6 +626,55 @@ impl SubscriptionRepository for MongoStore {
 }
 
 #[async_trait]
+impl SubscriptionMaintenanceRepository for MongoStore {
+    async fn list_expiring_subscriptions(
+        &self,
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>> {
+        self.subscriptions()
+            .find(
+                doc! {
+                    "subject_type": "chat",
+                    "active": true,
+                    "expires_at": {
+                        "$gt": bson_datetime(from),
+                        "$lte": bson_datetime(until),
+                    },
+                },
+                None,
+            )
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+
+    async fn list_expired_active_subscriptions(
+        &self,
+        now: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>> {
+        self.subscriptions()
+            .find(
+                doc! {
+                    "subject_type": "chat",
+                    "active": true,
+                    "expires_at": { "$lte": bson_datetime(now) },
+                },
+                None,
+            )
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+}
+
+#[async_trait]
 impl PaymentRepository for MongoStore {
     async fn find_payment(&self, payment_id: &PaymentId) -> ApplicationResult<Option<Payment>> {
         let dto = self
@@ -809,6 +883,19 @@ impl ExternalChannelSubscriptionRepository for MongoStore {
             })
     }
 
+    async fn list_all_external_channel_subscriptions(
+        &self,
+    ) -> ApplicationResult<Vec<ExternalChannelSubscription>> {
+        self.external_channel_subscriptions()
+            .find(doc! { "subject_type": "user" }, None)
+            .await
+            .map_err(repo_err)?
+            .map_err(repo_err)
+            .and_then(|dto| futures::future::ready(dto.try_into()))
+            .try_collect()
+            .await
+    }
+
     async fn save_external_channel_subscription(
         &self,
         subscription: &ExternalChannelSubscription,
@@ -861,6 +948,8 @@ struct DialogStateDto {
     text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending: Option<PendingReminderDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reminder_id: Option<i32>,
 }
 
 impl DialogStateDto {
@@ -870,10 +959,14 @@ impl DialogStateDto {
             state: dialog_state_to_str(&state).to_string(),
             text: None,
             pending: None,
+            reminder_id: None,
         };
 
         match state {
             DialogState::AwaitingTextConfirmation { text } => dto.text = Some(text),
+            DialogState::AwaitingExistingReminderText { reminder_id } => {
+                dto.reminder_id = Some(reminder_id.value());
+            }
             DialogState::AwaitingReminderConfirmation {
                 original_text,
                 interpreted,
@@ -888,6 +981,7 @@ impl DialogStateDto {
             | DialogState::AwaitingUtc
             | DialogState::AwaitingSnoozeButtons
             | DialogState::AwaitingAutoSnooze
+            | DialogState::AwaitingExistingReminderEditSelection
             | DialogState::AwaitingReminderDeletion
             | DialogState::AwaitingChannelSubscriptionDeletion => {}
         }
@@ -2206,6 +2300,10 @@ fn dialog_state_to_str(value: &DialogState) -> &'static str {
         DialogState::AwaitingTextConfirmation { .. } => "awaiting_text_confirmation",
         DialogState::AwaitingReminderConfirmation { .. } => "awaiting_reminder_confirmation",
         DialogState::AwaitingReminderEdit { .. } => "awaiting_reminder_edit",
+        DialogState::AwaitingExistingReminderEditSelection => {
+            "awaiting_existing_reminder_edit_selection"
+        }
+        DialogState::AwaitingExistingReminderText { .. } => "awaiting_existing_reminder_text",
         DialogState::AwaitingReminderDeletion => "awaiting_reminder_deletion",
         DialogState::AwaitingChannelSubscriptionDeletion => {
             "awaiting_channel_subscription_deletion"
@@ -2250,6 +2348,15 @@ fn dialog_state_from_dto(value: DialogStateDto) -> ApplicationResult<DialogState
                     )
                     .unwrap_or(DialogState::Idle)
             }),
+        "awaiting_existing_reminder_edit_selection" => {
+            Ok(DialogState::AwaitingExistingReminderEditSelection)
+        }
+        "awaiting_existing_reminder_text" => Ok(value
+            .reminder_id
+            .map(|reminder_id| DialogState::AwaitingExistingReminderText {
+                reminder_id: ReminderId::new(reminder_id),
+            })
+            .unwrap_or(DialogState::Idle)),
         "awaiting_reminder_deletion" => Ok(DialogState::AwaitingReminderDeletion),
         "awaiting_channel_subscription_deletion" => {
             Ok(DialogState::AwaitingChannelSubscriptionDeletion)
@@ -2408,6 +2515,7 @@ mod tests {
                 state: "unknown".to_string(),
                 text: None,
                 pending: None,
+                reminder_id: None,
             })
             .unwrap(),
             DialogState::Idle

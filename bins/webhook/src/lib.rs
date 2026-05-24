@@ -41,6 +41,11 @@ where
                 .send_text(chat_id.value(), &text)
                 .await
                 .map_err(|error| ApplicationError::ExternalService(error.to_string())),
+            Notification::ReminderDue { chat_id, text, .. } => self
+                .transport
+                .send_text(chat_id.value(), &text)
+                .await
+                .map_err(|error| ApplicationError::ExternalService(error.to_string())),
             Notification::Profile(_) => Ok(()),
         }
     }

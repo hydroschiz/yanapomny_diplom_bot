@@ -156,12 +156,14 @@ impl TimePreferences {
 
 impl Default for TimePreferences {
     fn default() -> Self {
-        Self::new(
+        let mut preferences = Self::new(
             NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
             NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
             NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
             UtcOffset::UTC,
-        )
+        );
+        preferences.time_zone = TimeZone::Utc;
+        preferences
     }
 }
 

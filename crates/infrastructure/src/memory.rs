@@ -4,7 +4,8 @@ use application::{
     ApplicationError, ApplicationResult, ChannelSubscriptionRepository, DialogState,
     DialogStateStore, ExternalChannelSubscriptionRepository, NaturalLanguageReminderParser,
     PaymentCachePort, PaymentGatewayPort, PaymentTransactionRepository, PendingPayment,
-    ReferralRepository, ReminderPreferencesRepository, ReminderRepository, StreamPlatformGateway,
+    ReferralRepository, ReminderPreferencesRepository, ReminderRepository,
+    SchedulerDeduplicationPort, StreamPlatformGateway, SubscriptionMaintenanceRepository,
     SubscriptionRepository, UserRepository,
 };
 use async_trait::async_trait;
@@ -35,6 +36,7 @@ struct InMemoryState {
     pending_payments_by_user: HashMap<UserId, PaymentId>,
     payment_notifications: HashMap<(PaymentId, String), DateTime<Utc>>,
     payment_locks: HashMap<PaymentId, DateTime<Utc>>,
+    scheduler_once: HashMap<String, DateTime<Utc>>,
     dialog_states: HashMap<UserId, DialogState>,
     parsed_schedules: HashMap<(UserId, String), Schedule>,
     latest_content: HashMap<String, Option<String>>,
@@ -137,6 +139,44 @@ impl SubscriptionRepository for InMemoryStore {
 }
 
 #[async_trait]
+impl SubscriptionMaintenanceRepository for InMemoryStore {
+    async fn list_expiring_subscriptions(
+        &self,
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .subscriptions
+            .values()
+            .filter(|subscription| {
+                subscription.active
+                    && subscription.expires_at > from
+                    && subscription.expires_at <= until
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn list_expired_active_subscriptions(
+        &self,
+        now: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .subscriptions
+            .values()
+            .filter(|subscription| subscription.active && subscription.expires_at <= now)
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait]
 impl ReminderRepository for InMemoryStore {
     async fn find_reminder(&self, id: ReminderId) -> ApplicationResult<Option<Reminder>> {
         Ok(self.state.lock().unwrap().reminders.get(&id).cloned())
@@ -190,6 +230,27 @@ impl ReminderPreferencesRepository for InMemoryStore {
             .map(|user| user.time_preferences.clone())
             .unwrap_or_default())
     }
+
+    async fn find_snooze_buttons_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> ApplicationResult<Vec<domain::SnoozeDuration>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .users
+            .values()
+            .find(|user| {
+                user.id.value() == chat_id.value()
+                    || user
+                        .identities
+                        .iter()
+                        .any(|identity| identity.chat_id == Some(chat_id))
+            })
+            .map(|user| user.snooze_buttons.clone())
+            .unwrap_or_else(|| User::new(UserId::new(chat_id.value())).snooze_buttons))
+    }
 }
 
 #[async_trait]
@@ -238,6 +299,19 @@ impl ExternalChannelSubscriptionRepository for InMemoryStore {
         user_id: UserId,
     ) -> ApplicationResult<Vec<ChannelSubscription>> {
         self.list_channel_subscriptions(user_id).await
+    }
+
+    async fn list_all_external_channel_subscriptions(
+        &self,
+    ) -> ApplicationResult<Vec<ChannelSubscription>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .channel_subscriptions
+            .values()
+            .flat_map(|subscriptions| subscriptions.iter().cloned())
+            .collect())
     }
 
     async fn save_external_channel_subscription(
@@ -433,6 +507,18 @@ impl PaymentCachePort for InMemoryStore {
     async fn release_fulfill_lock(&self, payment_id: &PaymentId) -> ApplicationResult<()> {
         self.state.lock().unwrap().payment_locks.remove(payment_id);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SchedulerDeduplicationPort for InMemoryStore {
+    async fn once(&self, key: &str, expires_at: DateTime<Utc>) -> ApplicationResult<bool> {
+        let mut state = self.state.lock().unwrap();
+        if state.scheduler_once.contains_key(key) {
+            return Ok(false);
+        }
+        state.scheduler_once.insert(key.to_string(), expires_at);
+        Ok(true)
     }
 }
 

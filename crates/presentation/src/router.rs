@@ -41,6 +41,8 @@ pub enum ConversationState {
     AwaitingTextConfirmation,
     AwaitingReminderConfirmation,
     AwaitingReminderEdit,
+    AwaitingExistingReminderEditSelection,
+    AwaitingExistingReminderText,
     AwaitingReminderDeletion,
     AwaitingSubDeleteNum,
 }
@@ -55,6 +57,10 @@ impl From<DialogState> for ConversationState {
             DialogState::AwaitingTextConfirmation { .. } => Self::AwaitingTextConfirmation,
             DialogState::AwaitingReminderConfirmation { .. } => Self::AwaitingReminderConfirmation,
             DialogState::AwaitingReminderEdit { .. } => Self::AwaitingReminderEdit,
+            DialogState::AwaitingExistingReminderEditSelection => {
+                Self::AwaitingExistingReminderEditSelection
+            }
+            DialogState::AwaitingExistingReminderText { .. } => Self::AwaitingExistingReminderText,
             DialogState::AwaitingReminderDeletion => Self::AwaitingReminderDeletion,
             DialogState::AwaitingChannelSubscriptionDeletion => Self::AwaitingSubDeleteNum,
         }
@@ -82,6 +88,8 @@ pub enum MessageRoute {
     GroupReminderText(String),
     ChannelSubscriptionUrl(ParsedChannelLink),
     ReminderEditText(String),
+    ExistingReminderEditSelection(String),
+    ExistingReminderEditText(String),
     ReminderDeletionInput(String),
     ChannelDeletionInput(String),
     Ignored,
@@ -106,6 +114,7 @@ pub enum CallbackRoute {
     CancelText,
     ConfirmReminder,
     EditReminder,
+    StartReminderEdit,
     CancelReminder,
     StartReminderDeletion,
     BackFromReminderDeletion,
@@ -162,15 +171,23 @@ impl Router {
             ConversationState::AwaitingReminderEdit => {
                 MessageRoute::ReminderEditText(text.to_string())
             }
+            ConversationState::AwaitingExistingReminderEditSelection => {
+                MessageRoute::ExistingReminderEditSelection(text.to_string())
+            }
+            ConversationState::AwaitingExistingReminderText => {
+                MessageRoute::ExistingReminderEditText(text.to_string())
+            }
             ConversationState::AwaitingReminderDeletion => {
                 MessageRoute::ReminderDeletionInput(text.to_string())
             }
             ConversationState::AwaitingSubDeleteNum => {
                 MessageRoute::ChannelDeletionInput(text.to_string())
             }
-            ConversationState::AwaitingPayment
-            | ConversationState::AwaitingTextConfirmation
-            | ConversationState::AwaitingReminderConfirmation => MessageRoute::Ignored,
+            ConversationState::AwaitingTextConfirmation
+            | ConversationState::AwaitingReminderConfirmation => {
+                route_idle_message(message, text, &context)
+            }
+            ConversationState::AwaitingPayment => MessageRoute::Ignored,
             ConversationState::Idle => route_idle_message(message, text, &context),
         }
     }
@@ -240,6 +257,7 @@ fn route_callback_payload(payload: CallbackPayload) -> CallbackRoute {
         CallbackPayload::TextCancel => CallbackRoute::CancelText,
         CallbackPayload::ReminderConfirm => CallbackRoute::ConfirmReminder,
         CallbackPayload::ReminderEdit => CallbackRoute::EditReminder,
+        CallbackPayload::ReminderEditStart => CallbackRoute::StartReminderEdit,
         CallbackPayload::ReminderCancel => CallbackRoute::CancelReminder,
         CallbackPayload::ReminderDeleteStart => CallbackRoute::StartReminderDeletion,
         CallbackPayload::ReminderDeleteBack => CallbackRoute::BackFromReminderDeletion,

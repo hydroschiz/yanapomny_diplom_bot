@@ -12,6 +12,8 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 application = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 domain = { workspace = true }
 dotenvy = "0.15"
 infrastructure = { workspace = true }

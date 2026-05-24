@@ -115,6 +115,10 @@ impl From<ApplicationNotification> for Notification {
                 text,
                 keyboard: None,
             },
+            ApplicationNotification::ReminderDue { text, .. } => Self::PlainText {
+                text,
+                keyboard: None,
+            },
             ApplicationNotification::Profile(profile) => Self::Profile {
                 user_id: profile.user_id.value(),
                 utc_offset: "не загружен".to_string(),

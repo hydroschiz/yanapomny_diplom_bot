@@ -26,8 +26,8 @@ use domain::{
     ChannelSubscription, ChatId, DeliveryChannel, DeliveryEvent, DeliveryEventId, DeliveryResult,
     Money, Months, Payment, PaymentId, PaymentProvider, PaymentStatus, PaymentTransaction,
     Platform, RecurrenceRule, Reminder, ReminderId, ReminderStatus, RetryPolicy, Schedule,
-    Subscription, Task, TaskId, TaskStatus, TimePreferences, TimeSpec, User, UserId,
-    UserPreferences,
+    SnoozeDuration, Subscription, Task, TaskId, TaskStatus, TimePreferences, TimeSpec, User,
+    UserId, UserPreferences,
 };
 
 #[tokio::test]
@@ -852,6 +852,24 @@ impl ReminderPreferencesRepository for AppMemory {
             .or_else(|| user.map(|user| user.time_preferences.clone()))
             .unwrap_or_default())
     }
+
+    async fn find_snooze_buttons_for_chat(
+        &self,
+        chat_id: ChatId,
+    ) -> application::ApplicationResult<Vec<SnoozeDuration>> {
+        let state = self.state.lock().unwrap();
+        let user = state.users.values().find(|user| {
+            user.id.value() == chat_id.value()
+                || user
+                    .identities
+                    .iter()
+                    .any(|identity| identity.chat_id == Some(chat_id))
+        });
+
+        Ok(user
+            .map(|user| user.snooze_buttons.clone())
+            .unwrap_or_else(|| domain::User::new(UserId::new(chat_id.value())).snooze_buttons))
+    }
 }
 
 #[async_trait]
@@ -1110,6 +1128,19 @@ impl ExternalChannelSubscriptionRepository for AppMemory {
             .get(&user_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn list_all_external_channel_subscriptions(
+        &self,
+    ) -> application::ApplicationResult<Vec<ChannelSubscription>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .channels
+            .values()
+            .flat_map(|subscriptions| subscriptions.iter().cloned())
+            .collect())
     }
 
     async fn save_external_channel_subscription(

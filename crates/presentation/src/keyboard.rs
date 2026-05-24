@@ -320,10 +320,10 @@ pub fn reminder_edit_keyboard(capabilities: TransportCapabilities) -> TransportK
 }
 
 pub fn list_delete_keyboard(capabilities: TransportCapabilities) -> TransportKeyboard {
-    KeyboardBuilder::new(capabilities).finish(vec![vec![TransportButton::callback(
-        "🗑 Удалить напоминание",
-        "reminder_delete_start",
-    )]])
+    KeyboardBuilder::new(capabilities).finish(vec![vec![
+        TransportButton::callback("🗑 Удалить", "reminder_delete_start"),
+        TransportButton::callback("✏️ Изменить", "reminder_edit_start"),
+    ]])
 }
 
 pub fn delete_keyboard(capabilities: TransportCapabilities) -> TransportKeyboard {

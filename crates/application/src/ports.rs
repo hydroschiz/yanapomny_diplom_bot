@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use domain::{
     ChannelSubscription, ChatId, DeliveryEvent, ExternalChannelSubscription, Months, Payment,
     PaymentId, PaymentStatus, PaymentTransaction, Referral, Reminder, ReminderId, Schedule,
-    Subscription, Task, TaskId, TimePreferences, User, UserId, UserPreferences,
+    SnoozeDuration, Subscription, Task, TaskId, TimePreferences, User, UserId, UserPreferences,
 };
 
 use crate::ApplicationResult;
@@ -33,6 +33,20 @@ pub trait TaskRepository: Send + Sync {
 pub trait SubscriptionRepository: Send + Sync {
     async fn find_subscription(&self, chat_id: ChatId) -> ApplicationResult<Option<Subscription>>;
     async fn save_subscription(&self, subscription: &Subscription) -> ApplicationResult<()>;
+}
+
+#[async_trait]
+pub trait SubscriptionMaintenanceRepository: Send + Sync {
+    async fn list_expiring_subscriptions(
+        &self,
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>>;
+
+    async fn list_expired_active_subscriptions(
+        &self,
+        now: DateTime<Utc>,
+    ) -> ApplicationResult<Vec<Subscription>>;
 }
 
 #[async_trait]
@@ -74,6 +88,17 @@ pub trait ReminderPreferencesRepository: Send + Sync {
         &self,
         chat_id: ChatId,
     ) -> ApplicationResult<TimePreferences>;
+
+    async fn find_snooze_buttons_for_chat(
+        &self,
+        _chat_id: ChatId,
+    ) -> ApplicationResult<Vec<SnoozeDuration>> {
+        Ok(vec![
+            SnoozeDuration::ONE_HOUR,
+            SnoozeDuration::THREE_HOURS,
+            SnoozeDuration::ONE_DAY,
+        ])
+    }
 }
 
 #[async_trait]
@@ -93,6 +118,9 @@ pub trait ExternalChannelSubscriptionRepository: Send + Sync {
     async fn list_external_channel_subscriptions(
         &self,
         user_id: UserId,
+    ) -> ApplicationResult<Vec<ExternalChannelSubscription>>;
+    async fn list_all_external_channel_subscriptions(
+        &self,
     ) -> ApplicationResult<Vec<ExternalChannelSubscription>>;
     async fn save_external_channel_subscription(
         &self,
@@ -165,6 +193,11 @@ pub trait PaymentCachePort: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> ApplicationResult<bool>;
     async fn release_fulfill_lock(&self, payment_id: &PaymentId) -> ApplicationResult<()>;
+}
+
+#[async_trait]
+pub trait SchedulerDeduplicationPort: Send + Sync {
+    async fn once(&self, key: &str, expires_at: DateTime<Utc>) -> ApplicationResult<bool>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +279,10 @@ pub enum DialogState {
         original_text: String,
         interpreted: InterpretedTask,
     },
+    AwaitingExistingReminderEditSelection,
+    AwaitingExistingReminderText {
+        reminder_id: ReminderId,
+    },
     AwaitingReminderDeletion,
     AwaitingChannelSubscriptionDeletion,
 }
@@ -259,7 +296,16 @@ pub trait DialogStateStore: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notification {
     Profile(ProfileNotification),
-    Text { chat_id: ChatId, text: String },
+    Text {
+        chat_id: ChatId,
+        text: String,
+    },
+    ReminderDue {
+        chat_id: ChatId,
+        reminder_id: ReminderId,
+        text: String,
+        snooze_buttons: Vec<SnoozeDuration>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
